@@ -41,6 +41,11 @@ class ModelConfig:
     hist_queries: int = 0      # readout queries derived from the recurrent state h[t-1] (pooling becomes sequential)
     static_queries: int = 0    # learned state- and action-independent readout queries (whole-screen inspection)
 
+    def __post_init__(self):
+        # checkpoints from before prev_query became a mode string stored a bool; True meant "sum"
+        if isinstance(self.prev_query, bool):
+            self.prev_query = "sum" if self.prev_query else ""
+
 
 class Fourier(nn.Module):
     def __init__(self, n_freq: int):

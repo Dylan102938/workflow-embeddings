@@ -187,7 +187,7 @@ class Prefetcher:
         self.pool.shutdown(wait=False)
 
 
-def stage_to_shm(src: Path, job_tag: str) -> Path:
+def stage_to_shm(src: Path, job_tag: str, include_crop: bool = True) -> Path:
     """Copy the frame cache into /dev/shm (RAM) once per job so several runs on the node share one copy.
     The persistent copy stays on NAS; the shm copy is removed by the sbatch script at exit."""
     dst = Path("/dev/shm") / f"wfemb_frames_{job_tag}"
@@ -206,7 +206,8 @@ def stage_to_shm(src: Path, job_tag: str) -> Path:
     import shutil
     dst.mkdir(parents=True, exist_ok=True)
     for f in sorted(src.glob("*")):
-        if f.suffix in (".npy", ".json"):
-            shutil.copy(f, dst / f.name)
+        if f.suffix not in (".npy", ".json") or (f.name.startswith("crop_") and not include_crop):
+            continue
+        shutil.copy(f, dst / f.name)
     done.touch()
     return dst

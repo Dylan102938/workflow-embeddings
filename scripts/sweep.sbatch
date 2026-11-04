@@ -14,7 +14,8 @@ source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
 SWEEP=$1
 SHM=/dev/shm/wfemb_frames_$SLURM_JOB_ID
 trap 'rm -rf "$SHM" "$SHM.lock"' EXIT
-$UV run python -c "from wfemb.data import stage_to_shm; from wfemb import paths; print(stage_to_shm(paths.FRAMES, '$SLURM_JOB_ID'))"
+CROP=False; [[ "$(cat $SWEEP)" == *--use_crop* ]] && CROP=True
+$UV run python -c "from wfemb.data import stage_to_shm; from wfemb import paths; print(stage_to_shm(paths.FRAMES, '$SLURM_JOB_ID', include_crop=$CROP))"
 export WFEMB_FRAMES_DIR=$SHM
 echo "git: $(git rev-parse --short HEAD)  host: $(hostname)  gpus: $CUDA_VISIBLE_DEVICES"
 mapfile -t RUNS < <(grep -v '^\s*#' "$SWEEP" | grep -v '^\s*$')

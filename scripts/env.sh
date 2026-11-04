@@ -8,5 +8,6 @@ export TRITON_CACHE_DIR=/nas/ucb/dfeng/.cache/triton
 export UV=/nas/ucb/dfeng/bin/uv
 export REPO=/nas/ucb/dfeng/code/workflow-embeddings
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$WFEMB_DATA/logs" "$TMPDIR"
 cd "$REPO"

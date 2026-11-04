@@ -18,7 +18,7 @@ from .loss import false_negative_mask, info_nce
 
 
 @torch.no_grad()
-def embed_split(model, data: SessionData, sidx: np.ndarray, device, batch: int = 64):
+def embed_split(model, data: SessionData, sidx: np.ndarray, device, batch: int = 64, max_frames: int = 4096):
     """Returns d [S, T_max, D] fp16, k [S, T_max] fp32, lengths [S] (CPU), in the order of sidx."""
     model.eval()
     T_max = int(data.length[sidx].max())
@@ -27,7 +27,7 @@ def embed_split(model, data: SessionData, sidx: np.ndarray, device, batch: int =
     k_all = torch.zeros(len(sidx), T_max)
     pos = {int(s): i for i, s in enumerate(sidx)}
     rng = np.random.default_rng(0)
-    for bidx in length_bucketed_batches(data.length, sidx, batch, rng, drop_last=False):
+    for bidx in length_bucketed_batches(data.length, sidx, batch, rng, drop_last=False, max_frames=max_frames):
         b = data.finalize(data.make_batch(bidx).to(device))
         with torch.autocast("cuda", dtype=torch.bfloat16):
             d, k = model(b)

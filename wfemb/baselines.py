@@ -31,7 +31,7 @@ def action_docs(data: SessionData) -> list[str]:
                     continue
                 tok = EVENT_TYPES[t]
                 xy = ev["ev_xy"][g, j]
-                if not np.isnan(xy[0]):
+                if not (np.isnan(xy[0]) or np.isnan(xy[1])):
                     tok += f"@{int(min(xy[0], 0.999) * 4)}{int(min(xy[1], 0.999) * 4)}"
                 ks = [k for k in ev["ev_keys"][g, j] if k > 0]
                 if ks:

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=wfemb-judge
 #SBATCH --partition=main
+#SBATCH --qos=high          # highest-priority QOS available to the account (max 8 GPUs per user)
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=1-00:00:00

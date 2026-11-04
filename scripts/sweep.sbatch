@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=wfemb-sweep
 #SBATCH --partition=main
+#SBATCH --qos=high          # highest-priority QOS available to the account (max 8 GPUs per user)
 #SBATCH --gres=gpu:4
 #SBATCH --exclude=ddpg.ist.berkeley.edu,dqn.ist.berkeley.edu,gail.ist.berkeley.edu,gan.ist.berkeley.edu,ppo.ist.berkeley.edu,vae.ist.berkeley.edu   # A100 nodes only (airl/sac: SXM4-80GB, cirl/rlhf: PCI-80GB)
 #SBATCH --cpus-per-task=24

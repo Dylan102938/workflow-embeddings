@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=wfemb-download
 #SBATCH --partition=main
+#SBATCH --qos=high          # highest-priority QOS available to the account (max 8 GPUs per user)
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --time=2-00:00:00

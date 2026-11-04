@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import json
 import math
@@ -41,6 +42,7 @@ def get_args(argv=None):
     ap.add_argument("--wd", type=float, default=0.05)
     ap.add_argument("--epochs", type=float, default=30)
     ap.add_argument("--warmup", type=int, default=500)
+    ap.add_argument("--ema", type=float, default=0.0, help="EMA decay of weights used for eval/checkpoints (0 = off)")
     ap.add_argument("--max_len", type=int, default=0)
     ap.add_argument("--step_drop", type=float, default=0.0, help="training-time intermediate-step dropout")
     ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
@@ -122,6 +124,18 @@ def main(argv=None):
                       k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
                       tok_drop=args.tok_drop)
     model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
+    ema = None
+    if args.ema > 0:
+        ema = copy.deepcopy(model)
+        for p_ in ema.parameters():
+            p_.requires_grad_(False)
+
+    def ema_update():
+        with torch.no_grad():
+            for pe, pm in zip(ema.parameters(), model.parameters()):
+                pe.lerp_(pm, 1.0 - args.ema)
+            for be, bm in zip(ema.buffers(), model.buffers()):
+                be.copy_(bm)
     n_params = sum(p.numel() for p in model.parameters())
     decay = [p for n, p in model.named_parameters() if p.ndim >= 2 and "emb" not in n]
     no_decay = [p for n, p in model.named_parameters() if not (p.ndim >= 2 and "emb" not in n)]
@@ -173,6 +187,8 @@ def main(argv=None):
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            if ema is not None:
+                ema_update()
             sched.step()
             step += 1
             run_loss += loss.item()
@@ -184,10 +200,11 @@ def main(argv=None):
                      "steps_per_s": args.log_every / dt, "data_wait_frac": data_wait / dt})
                 t_last, data_wait, run_loss, run_n = time.time(), 0.0, 0.0, 0
             if step % args.eval_every == 0 or step == total:
-                m = evaluate(model, data, "val", device, args.eval_theta_fn, U, train_idx)
+                eval_model = ema if ema is not None else model
+                m = evaluate(eval_model, data, "val", device, args.eval_theta_fn, U, train_idx)
                 rec = {"step": step, "epoch": epoch, **{f"val_{k_}": v for k_, v in m.items()}}
                 log(rec)
-                state = {"model": model.state_dict(), "cfg": dataclasses.asdict(cfg), "args": vars(args),
+                state = {"model": eval_model.state_dict(), "cfg": dataclasses.asdict(cfg), "args": vars(args),
                          "step": step}
                 sel = args.select_on if args.select_on in m else "loss"   # metric may be unavailable
                 for key in tracked:

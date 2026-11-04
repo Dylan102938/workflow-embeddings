@@ -32,7 +32,7 @@ class ModelConfig:
     k_init: float = 5.0      # initial kappa (~1/0.2)
     dropout: float = 0.0
     tok_drop: float = 0.0    # training-time fraction of frame tokens hidden from the attention pool
-    prev_query: bool = False # pool queries also conditioned on the previous step's action (to see its effect)
+    prev_query: str = ""     # "" | "sum" (prev action added to the same queries) | "sep" (its own query group)
 
 
 class Fourier(nn.Module):
@@ -89,8 +89,11 @@ class CrossAttnPool(nn.Module):
         self.pos = nn.Parameter(torch.randn(cfg.n_tok, d) * 0.02)
         self.q_base = nn.Parameter(torch.randn(Q, d) * 0.02)
         self.q_from_a = nn.Linear(d, Q * d)
+        self.prev_mode = cfg.prev_query
         self.q_from_prev = nn.Linear(d, Q * d) if cfg.prev_query else None
-        self.out = nn.Linear(Q * d, d)
+        if cfg.prev_query == "sep":
+            self.q_base_prev = nn.Parameter(torch.randn(Q, d) * 0.02)
+        self.out = nn.Linear((2 if cfg.prev_query == "sep" else 1) * Q * d, d)
 
     def forward(self, a, tokens, a_prev=None):                           # a [N, d], tokens [N, n_tok, d_vis]
         N, n_tok, _ = tokens.shape
@@ -98,8 +101,10 @@ class CrossAttnPool(nn.Module):
         k = self.k_proj(x) + self.pos[:n_tok]
         v = self.v_proj(x)
         q = self.q_base + self.q_from_a(a).view(N, self.Q, -1)
-        if self.q_from_prev is not None:
+        if self.prev_mode == "sum":
             q = q + self.q_from_prev(a_prev).view(N, self.Q, -1)
+        elif self.prev_mode == "sep":
+            q = torch.cat([q, self.q_base_prev + self.q_from_prev(a_prev).view(N, self.Q, -1)], 1)
         sh = lambda t: t.view(N, t.shape[1], self.heads, -1).transpose(1, 2)
         mask = None
         if self.training and self.tok_drop > 0:
@@ -135,7 +140,7 @@ class SessionStateMachine(nn.Module):
         a, has_ev = self.event_enc(b.ev_type, b.ev_xy, b.ev_scroll, b.ev_keys, b.ev_text, self.text_table)
         a = torch.where(has_ev[..., None], a, self.no_event.to(a.dtype))
         a_prev = None
-        if self.cfg.prev_query:   # the action that produced this frame; a learned start token at t = 0
+        if self.cfg.prev_query:   # the action that produced this frame; the no-event embedding at t = 0
             start = self.no_event.to(a.dtype).expand(B, 1, -1)
             a_prev = torch.cat([start, a[:, :-1]], 1).reshape(B * T, -1)
         f = self.frame_pool(a.reshape(B * T, -1), b.frames.reshape(B * T, *b.frames.shape[2:]), a_prev).view(B, T, -1)

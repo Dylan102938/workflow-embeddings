@@ -36,7 +36,8 @@ def get_args(argv=None):
     ap.add_argument("--k_min", type=float, default=1.0)
     ap.add_argument("--k_max", type=float, default=100.0)
     ap.add_argument("--use_crop", action="store_true")
-    ap.add_argument("--prev_query", action="store_true", help="frame pool also queried by the previous action")
+    ap.add_argument("--prev_query", nargs="?", const="sum", default="", choices=["", "sum", "sep"],
+                    help="frame pool also queried by the previous action: sum (same queries) or sep (own group)")
     # optimization
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)

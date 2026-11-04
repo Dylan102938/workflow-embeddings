@@ -9,9 +9,9 @@ KEYS = DATA / "keys"              # frozen text embeddings (instructions, paraph
 FRAMES = DATA / "frames"          # frozen vision-encoder cache
 RUNS = DATA / "runs"              # checkpoints + logs
 
-ZIPS = {
-    "ubuntu": RAW / "ubuntu_images" / "merged.zip",
-    "win_mac": RAW / "win_mac_images" / "merged.zip",
+ZIPS = {   # last part of each split archive; read in place with wfemb.splitzip (no merged copy: NAS quota)
+    "ubuntu": RAW / "ubuntu_images" / "images.zip",
+    "win_mac": RAW / "win_mac_images" / "images.zip",
 }
 JSONLS = {
     "ubuntu": RAW / "agentnet_ubuntu_5k.jsonl",

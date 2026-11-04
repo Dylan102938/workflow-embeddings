@@ -15,7 +15,6 @@ import json
 import os
 import pickle
 import time
-import zipfile
 
 import numpy as np
 import torch
@@ -23,6 +22,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from . import paths
+from .splitzip import SplitZip
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -41,9 +41,9 @@ class FrameDataset(torch.utils.data.Dataset):
         self.proc = AutoImageProcessor.from_pretrained(self.encoder)
         self.zips, self.index = {}, {}
         for src, zp in paths.ZIPS.items():
-            z = zipfile.ZipFile(zp)
+            z = SplitZip(zp)
             self.zips[src] = z
-            self.index[src] = {os.path.basename(n): n for n in z.namelist() if not n.endswith("/")}
+            self.index[src] = z.basename_index()
 
     def __len__(self):
         return len(self.items)
@@ -52,8 +52,7 @@ class FrameDataset(torch.utils.data.Dataset):
         member = self.index[src].get(name)
         if member is None:
             return None
-        with self.zips[src].open(member) as fh:
-            return Image.open(io.BytesIO(fh.read())).convert("RGB")
+        return Image.open(io.BytesIO(self.zips[src].read(member))).convert("RGB")
 
     def __getitem__(self, i):
         if self.zips is None:

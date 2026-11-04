@@ -12,6 +12,7 @@ dependencies = [
     "tqdm>=4.66",
     "scikit-learn>=1.4",
     "pyyaml>=6.0",
+    "anthropic>=1.0",
 ]
 
 [project.optional-dependencies]

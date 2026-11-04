@@ -32,6 +32,7 @@ class ModelConfig:
     k_init: float = 5.0      # initial kappa (~1/0.2)
     dropout: float = 0.0
     tok_drop: float = 0.0    # training-time fraction of frame tokens hidden from the attention pool
+    prev_query: bool = False # pool queries also conditioned on the previous step's action (to see its effect)
 
 
 class Fourier(nn.Module):
@@ -88,14 +89,17 @@ class CrossAttnPool(nn.Module):
         self.pos = nn.Parameter(torch.randn(cfg.n_tok, d) * 0.02)
         self.q_base = nn.Parameter(torch.randn(Q, d) * 0.02)
         self.q_from_a = nn.Linear(d, Q * d)
+        self.q_from_prev = nn.Linear(d, Q * d) if cfg.prev_query else None
         self.out = nn.Linear(Q * d, d)
 
-    def forward(self, a, tokens):                                        # a [N, d], tokens [N, n_tok, d_vis]
+    def forward(self, a, tokens, a_prev=None):                           # a [N, d], tokens [N, n_tok, d_vis]
         N, n_tok, _ = tokens.shape
         x = self.kv_norm(tokens)
         k = self.k_proj(x) + self.pos[:n_tok]
         v = self.v_proj(x)
         q = self.q_base + self.q_from_a(a).view(N, self.Q, -1)
+        if self.q_from_prev is not None:
+            q = q + self.q_from_prev(a_prev).view(N, self.Q, -1)
         sh = lambda t: t.view(N, t.shape[1], self.heads, -1).transpose(1, 2)
         mask = None
         if self.training and self.tok_drop > 0:
@@ -130,7 +134,11 @@ class SessionStateMachine(nn.Module):
         B, T = b.valid.shape
         a, has_ev = self.event_enc(b.ev_type, b.ev_xy, b.ev_scroll, b.ev_keys, b.ev_text, self.text_table)
         a = torch.where(has_ev[..., None], a, self.no_event.to(a.dtype))
-        f = self.frame_pool(a.reshape(B * T, -1), b.frames.reshape(B * T, *b.frames.shape[2:])).view(B, T, -1)
+        a_prev = None
+        if self.cfg.prev_query:   # the action that produced this frame; a learned start token at t = 0
+            start = self.no_event.to(a.dtype).expand(B, 1, -1)
+            a_prev = torch.cat([start, a[:, :-1]], 1).reshape(B * T, -1)
+        f = self.frame_pool(a.reshape(B * T, -1), b.frames.reshape(B * T, *b.frames.shape[2:]), a_prev).view(B, T, -1)
         return self.drop(self.fuse(torch.cat([f, a], -1)))
 
     def heads(self, h):

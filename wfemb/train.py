@@ -36,6 +36,7 @@ def get_args(argv=None):
     ap.add_argument("--k_min", type=float, default=1.0)
     ap.add_argument("--k_max", type=float, default=100.0)
     ap.add_argument("--use_crop", action="store_true")
+    ap.add_argument("--prev_query", action="store_true", help="frame pool also queried by the previous action")
     # optimization
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -125,7 +126,7 @@ def main(argv=None):
     cfg = ModelConfig(d_key=U.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, d=args.d, h=args.h,
                       n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
                       k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
-                      tok_drop=args.tok_drop)
+                      tok_drop=args.tok_drop, prev_query=args.prev_query)
     model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
     ema = None
     if args.ema > 0:

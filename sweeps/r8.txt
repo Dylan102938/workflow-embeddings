@@ -1,0 +1,10 @@
+# Round 8. r7 plateaued at val ~4.20 (seed noise ~0.02). New: pool queries also conditioned on the previous action
+# (look at the effect of what was just done). Plus replicate the more-regularized config (best test, 5.210).
+#   C: --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1
+#   R: --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1
+--run r8_prevq --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1 --prev_query
+--run r8_prevq_seed1 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1 --prev_query --seed 1
+--run r8_prevq_reg --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1 --prev_query
+--run r8_reg_seed1 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1 --seed 1
+--run r8_reg_ls20_tau10 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --smooth_tau 0.1
+--run r8_prevq_reg_ls20 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query

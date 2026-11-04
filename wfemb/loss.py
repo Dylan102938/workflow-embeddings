@@ -25,10 +25,26 @@ def step_logits(d, k, U, pos_keys, target, fn_mask):
     return logits
 
 
-def info_nce(d, k, valid, U, pos_keys, target, fn_mask, return_steps=False):
+def smooth_targets(U, own_key, target, fn_mask, eps, tau):
+    """(1 - eps) * one-hot(target) + eps * softmax(cos(own_key, U) / tau) over the unmasked candidates
+    other than the target itself (its self-similarity would otherwise absorb all of the smoothing mass)."""
+    rows = torch.arange(len(target), device=U.device)
+    sims = (own_key @ U.T / tau).masked_fill(fn_mask, float("-inf"))
+    sims[rows, target] = float("-inf")
+    q = eps * sims.softmax(-1)
+    q[rows, target] += 1.0 - eps
+    return q
+
+
+def info_nce(d, k, valid, U, pos_keys, target, fn_mask, return_steps=False, soft_targets=None):
+    """soft_targets [B, N] (training-time label smoothing) replaces the one-hot target when given."""
     logits = step_logits(d, k, U, pos_keys, target, fn_mask)
     B, T, N = logits.shape
-    ce = F.cross_entropy(logits.reshape(B * T, N), target.repeat_interleave(T), reduction="none").view(B, T)
+    if soft_targets is None:
+        ce = F.cross_entropy(logits.reshape(B * T, N), target.repeat_interleave(T), reduction="none").view(B, T)
+    else:
+        logp = logits.log_softmax(-1).masked_fill(fn_mask[:, None, :], 0.0)   # masked columns have q = 0
+        ce = -(soft_targets[:, None, :] * logp).sum(-1)
     ce = ce * valid
     per_session = ce.sum(1) / valid.sum(1)                               # each session weighs the same
     if return_steps:

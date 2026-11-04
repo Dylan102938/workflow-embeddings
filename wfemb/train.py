@@ -16,7 +16,7 @@ import torch
 from . import paths
 from .data import Prefetcher, SessionData, length_bucketed_batches
 from .evaluate import evaluate
-from .loss import false_negative_mask, info_nce
+from .loss import false_negative_mask, info_nce, smooth_targets
 from .model import ModelConfig, SessionStateMachine
 
 
@@ -54,6 +54,9 @@ def get_args(argv=None):
                     help="every candidate column shows a random wording (not only the positive), so paraphrase "
                          "style cannot separate positives from negatives")
     ap.add_argument("--center_keys", action="store_true", help="subtract the train-key mean, renormalize")
+    ap.add_argument("--label_smooth", type=float, default=0.0,
+                    help="eps of similarity-based label smoothing (train only; eval stays plain CE)")
+    ap.add_argument("--smooth_tau", type=float, default=0.05, help="temperature of the smoothing distribution")
     # eval / logging
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--log_every", type=int, default=50)
@@ -182,7 +185,9 @@ def main(argv=None):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 d, k = model(b)
             fn = false_negative_mask(U, gU, U[target], gU[target], target, args.theta_fn)
-            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn)
+            soft = (smooth_targets(U, U[target], target, fn, args.label_smooth, args.smooth_tau)
+                    if args.label_smooth > 0 else None)
+            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn, soft_targets=soft)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

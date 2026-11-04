@@ -46,6 +46,9 @@ def get_args(argv=None):
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
     ap.add_argument("--eval_theta_fn", type=float, default=0.9, help="fixed across runs so val metrics compare")
     ap.add_argument("--no_para", action="store_true", help="disable paraphrase augmentation")
+    ap.add_argument("--para_negatives", action="store_true",
+                    help="every candidate column shows a random wording (not only the positive), so paraphrase "
+                         "style cannot separate positives from negatives")
     ap.add_argument("--center_keys", action="store_true", help="subtract the train-key mean, renormalize")
     # eval / logging
     ap.add_argument("--eval_every", type=int, default=500)
@@ -98,6 +101,16 @@ def main(argv=None):
           f"{data.frames.total} frames, n_tok={data.frames.n_tok}", flush=True)
 
     U = torch.from_numpy(data.keys[train_idx]).to(device)                # N x D, frozen
+    if args.para_negatives:
+        P_keys = torch.from_numpy(data.para_keys).to(device)
+        P_off = torch.from_numpy(data.para_offset[train_idx]).to(device)
+        P_cnt = torch.from_numpy(data.para_count[train_idx].astype(np.int64)).to(device)
+
+    def sample_wordings():
+        """U with each column replaced by a uniformly drawn wording of that instruction (original or paraphrase)."""
+        pick = (torch.rand(len(P_cnt), device=device) * (P_cnt + 1).float()).long()
+        alt = P_keys[(P_off + pick - 1).clamp(min=0)]
+        return torch.where((pick > 0)[:, None], alt, U)
     gU = torch.from_numpy(data.group[train_idx]).to(device)
     pos_in_U = np.full(len(data.sessions), -1, np.int64)
     pos_in_U[train_idx] = np.arange(len(train_idx))
@@ -141,12 +154,17 @@ def main(argv=None):
             data_wait += time.time() - tw
             bidx = b.idx.cpu().numpy()
             # paraphrase augmentation: a random wording of each instruction, re-drawn every time (main thread rng)
-            pos_keys = torch.from_numpy(data.sample_positive_keys(bidx, rng)).to(device, non_blocking=True)
             target = torch.from_numpy(pos_in_U[bidx]).to(device)
+            if args.para_negatives:
+                U_step = sample_wordings()
+                pos_keys = U_step[target]
+            else:
+                U_step = U
+                pos_keys = torch.from_numpy(data.sample_positive_keys(bidx, rng)).to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 d, k = model(b)
             fn = false_negative_mask(U, gU, U[target], gU[target], target, args.theta_fn)
-            loss = info_nce(d, k, b.valid.float(), U, pos_keys, target, fn)
+            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

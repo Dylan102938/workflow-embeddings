@@ -31,6 +31,7 @@ class ModelConfig:
     k_max: float = 100.0
     k_init: float = 5.0      # initial kappa (~1/0.2)
     dropout: float = 0.0
+    tok_drop: float = 0.0    # training-time fraction of frame tokens hidden from the attention pool
 
 
 class Fourier(nn.Module):
@@ -80,7 +81,7 @@ class CrossAttnPool(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         d, Q = cfg.d, cfg.n_queries
-        self.Q, self.heads = Q, cfg.n_heads
+        self.Q, self.heads, self.tok_drop = Q, cfg.n_heads, cfg.tok_drop
         self.kv_norm = nn.LayerNorm(cfg.d_vis)
         self.k_proj = nn.Linear(cfg.d_vis, d)
         self.v_proj = nn.Linear(cfg.d_vis, d)
@@ -96,7 +97,12 @@ class CrossAttnPool(nn.Module):
         v = self.v_proj(x)
         q = self.q_base + self.q_from_a(a).view(N, self.Q, -1)
         sh = lambda t: t.view(N, t.shape[1], self.heads, -1).transpose(1, 2)
-        o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v))          # [N, heads, Q, d/heads]
+        mask = None
+        if self.training and self.tok_drop > 0:
+            keep = torch.rand(N, n_tok, device=tokens.device) >= self.tok_drop
+            keep[torch.arange(N, device=tokens.device), torch.randint(0, n_tok, (N,), device=tokens.device)] = True
+            mask = keep[:, None, None, :]                                # True = attend
+        o = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), attn_mask=mask)   # [N, heads, Q, d/heads]
         return self.out(o.transpose(1, 2).reshape(N, -1))
 
 

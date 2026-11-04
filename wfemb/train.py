@@ -31,6 +31,7 @@ def get_args(argv=None):
     ap.add_argument("--h", type=int, default=1024)
     ap.add_argument("--n_queries", type=int, default=4)
     ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--tok_drop", type=float, default=0.0, help="frame-token dropout in the attention pool")
     ap.add_argument("--k_min", type=float, default=1.0)
     ap.add_argument("--k_max", type=float, default=100.0)
     ap.add_argument("--use_crop", action="store_true")
@@ -117,7 +118,8 @@ def main(argv=None):
 
     cfg = ModelConfig(d_key=U.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, d=args.d, h=args.h,
                       n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
-                      k_min=args.k_min, k_max=args.k_max, dropout=args.dropout)
+                      k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
+                      tok_drop=args.tok_drop)
     model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     decay = [p for n, p in model.named_parameters() if p.ndim >= 2 and "emb" not in n]

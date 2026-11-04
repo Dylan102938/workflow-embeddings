@@ -21,7 +21,8 @@ def main():
     args = ap.parse_args()
     with open(paths.PREP / "sessions.pkl", "rb") as f:
         sessions = pickle.load(f)
-    keys = torch.from_numpy(np.load(paths.KEYS / "keys.npy")).cuda()
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    keys = torch.from_numpy(np.load(paths.KEYS / "keys.npy")).to(dev)
     tr = [i for i, s in enumerate(sessions) if s["split"] == "train"]
     U = keys[tr]
     instr = [sessions[i]["instruction"] for i in tr]

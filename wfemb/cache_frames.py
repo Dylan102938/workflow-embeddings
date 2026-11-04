@@ -132,10 +132,9 @@ def main():
     tag = f"{args.shard:02d}of{args.num_shards:02d}"
     print(f"shard {tag}: frames [{lo}, {hi}) of {n}", flush=True)
 
-    from transformers import AutoModel
-    model = AutoModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16, attn_implementation="sdpa")
-    vision = model.vision_model.cuda().eval()
-    del model
+    from transformers import Siglip2VisionModel
+    vision = Siglip2VisionModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16,
+                                                attn_implementation="sdpa").vision_model.cuda().eval()
     dim = vision.config.hidden_size
 
     g_path, c_path = out_dir / f"global_{tag}.npy", out_dir / f"crop_{tag}.npy"

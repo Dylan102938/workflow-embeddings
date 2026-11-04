@@ -11,4 +11,6 @@
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%A_%a.out
 set -euo pipefail
 source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
+echo "host $(hostname)  git $(git rev-parse --short HEAD)  args: $*"
+$UV run python -c "import sys, torch, transformers; print(sys.version.split()[0], torch.__version__, transformers.__version__, torch.cuda.get_device_name(0))"
 $UV run python -m wfemb.cache_frames --shard "$SLURM_ARRAY_TASK_ID" --num_shards 8 --workers 11 "$@"

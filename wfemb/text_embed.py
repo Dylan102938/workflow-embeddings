@@ -56,10 +56,17 @@ def main():
                     help="embed instructions with incidental literals replaced by placeholders")
     ap.add_argument("--skip_texts", action="store_true")
     ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--overwrite_default", action="store_true",
+                    help="allow writing the default key set (paths.SHARED); otherwise set WFEMB_KEYS")
     ap.add_argument("--para_keep_frac", type=float, default=0.0,
                     help="if set, choose theta_para as the similarity quantile that keeps this fraction "
                          "(calibrates the drift filter to a new embedder's similarity scale)")
     args = ap.parse_args()
+    if paths.KEYS.resolve() == paths.SHARED.resolve() and (paths.SHARED / "keys.npy").exists() \
+            and not args.overwrite_default:
+        raise SystemExit(f"refusing to overwrite the default key set in {paths.SHARED}; set WFEMB_KEYS to a new "
+                         f"directory (or pass --overwrite_default)")
+    print(f"writing key set to {paths.KEYS} (model {args.model})", flush=True)
     paths.KEYS.mkdir(parents=True, exist_ok=True)
 
     with open(paths.PREP / "sessions.pkl", "rb") as f:

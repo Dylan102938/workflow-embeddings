@@ -28,8 +28,9 @@ Image.MAX_IMAGE_PIXELS = None
 
 
 class FrameDataset(torch.utils.data.Dataset):
-    def __init__(self, items, encoder, global_patches, crop_patches, crop_frac, crop_px):
+    def __init__(self, items, encoder, global_patches, crop_patches, crop_frac, crop_px, do_global=True):
         self.items = items
+        self.do_global = do_global
         self.encoder = encoder
         self.gp, self.cp = global_patches, crop_patches
         self.crop_frac, self.crop_px = crop_frac, crop_px
@@ -70,10 +71,13 @@ class FrameDataset(torch.utils.data.Dataset):
         left = int(round(min(max(fx * W - side / 2, 0), W - side)))
         top = int(round(min(max(fy * H - side / 2, 0), H - side)))
         crop = img.crop((left, top, left + side, top + side)).resize((self.crop_px, self.crop_px), Image.BICUBIC)
-        g = self.proc(images=[img], max_num_patches=self.gp, return_tensors="pt")
         c = self.proc(images=[crop], max_num_patches=self.cp, return_tensors="pt")
-        return (gi, ok, W, H, g["pixel_values"][0], g["pixel_attention_mask"][0], g["spatial_shapes"][0],
-                c["pixel_values"][0], c["pixel_attention_mask"][0], c["spatial_shapes"][0])
+        if self.do_global:
+            g = self.proc(images=[img], max_num_patches=self.gp, return_tensors="pt")
+            gv, gm, gs = g["pixel_values"][0], g["pixel_attention_mask"][0], g["spatial_shapes"][0]
+        else:
+            gv, gm, gs = torch.zeros(1), torch.zeros(1), torch.zeros(2, dtype=torch.long)
+        return (gi, ok, W, H, gv, gm, gs, c["pixel_values"][0], c["pixel_attention_mask"][0], c["spatial_shapes"][0])
 
 
 def collate(batch):
@@ -110,8 +114,11 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="debug: only the first N frames of the shard")
+    ap.add_argument("--mode", choices=["full", "effect"], default="full",
+                    help="effect: only a crop of each frame around the PREVIOUS step's action point (what it did)")
     args = ap.parse_args()
-    out_dir = paths.FRAMES
+    effect = args.mode == "effect"
+    out_dir = paths.FRAMES_EFFECT if effect else paths.FRAMES
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with open(paths.PREP / "sessions.pkl", "rb") as f:
@@ -120,9 +127,13 @@ def main():
     focus = ev["focus"]
     items = []
     for s in sessions:
-        for img in s["images"]:
+        for t, img in enumerate(s["images"]):
             g = len(items)
-            items.append((g, s["source"], img, float(focus[g, 0]), float(focus[g, 1])))
+            if effect:   # where the previous action landed; screen center for the first frame
+                fx, fy = (float(focus[g - 1, 0]), float(focus[g - 1, 1])) if t > 0 else (0.5, 0.5)
+            else:
+                fx, fy = float(focus[g, 0]), float(focus[g, 1])
+            items.append((g, s["source"], img, fx, fy))
     n = len(items)
     bounds = np.linspace(0, n, args.num_shards + 1).astype(int)
     lo, hi = int(bounds[args.shard]), int(bounds[args.shard + 1])
@@ -136,53 +147,60 @@ def main():
                                                 attn_implementation="sdpa").vision_model.cuda().eval()
     dim = vision.config.hidden_size
 
-    g_path, c_path = out_dir / f"global_{tag}.npy", out_dir / f"crop_{tag}.npy"
+    g_path = out_dir / f"global_{tag}.npy"
+    c_path = out_dir / (f"effect_{tag}.npy" if effect else f"crop_{tag}.npy")
     prog_path = out_dir / f"progress_{tag}.json"
     G, C = args.grid ** 2, args.crop_grid ** 2
     start = lo
-    if prog_path.exists() and g_path.exists():
+    if prog_path.exists() and c_path.exists():
         start = json.load(open(prog_path))["next"]
-        g_mm = np.load(g_path, mmap_mode="r+")
+        g_mm = None if effect else np.load(g_path, mmap_mode="r+")
         c_mm = np.load(c_path, mmap_mode="r+")
         sizes = np.load(out_dir / f"sizes_{tag}.npy", mmap_mode="r+")
         print(f"resuming at {start}", flush=True)
     else:
-        g_mm = np.lib.format.open_memmap(g_path, mode="w+", dtype=np.uint16, shape=(hi - lo, G, dim))
+        g_mm = None if effect else np.lib.format.open_memmap(g_path, mode="w+", dtype=np.uint16,
+                                                              shape=(hi - lo, G, dim))
         c_mm = np.lib.format.open_memmap(c_path, mode="w+", dtype=np.uint16, shape=(hi - lo, C, dim))
         sizes = np.lib.format.open_memmap(out_dir / f"sizes_{tag}.npy", mode="w+", dtype=np.int32,
                                           shape=(hi - lo, 3))
     ds = FrameDataset(items[start:hi], args.encoder, args.global_patches, args.crop_patches,
-                      args.crop_frac, args.crop_px)
+                      args.crop_frac, args.crop_px, do_global=not effect)
     dl = torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers, collate_fn=collate,
                                      prefetch_factor=4, persistent_workers=False, pin_memory=True)
     t0, done, missing = time.time(), 0, 0
     with torch.inference_mode():
         for bi, (gi, ok, W, H, gpv, gmask, gshape, cpv, cmask, cshape) in enumerate(dl):
-            gh = vision(pixel_values=gpv.cuda(non_blocking=True).to(torch.bfloat16),
-                        attention_mask=gmask.cuda(non_blocking=True),
-                        spatial_shapes=gshape.cuda(non_blocking=True)).last_hidden_state
+            if not effect:
+                gh = vision(pixel_values=gpv.cuda(non_blocking=True).to(torch.bfloat16),
+                            attention_mask=gmask.cuda(non_blocking=True),
+                            spatial_shapes=gshape.cuda(non_blocking=True)).last_hidden_state
             ch = vision(pixel_values=cpv.cuda(non_blocking=True).to(torch.bfloat16),
                         attention_mask=cmask.cuda(non_blocking=True),
                         spatial_shapes=cshape.cuda(non_blocking=True)).last_hidden_state
-            gp = pool_grid(gh, gshape, (args.grid, args.grid))
             cp = pool_grid(ch, cshape, (args.crop_grid, args.crop_grid))
             rows = (gi - lo).numpy()
-            g_mm[rows] = to_bf16_bits(gp)
+            if not effect:
+                g_mm[rows] = to_bf16_bits(pool_grid(gh, gshape, (args.grid, args.grid)))
             c_mm[rows] = to_bf16_bits(cp)
             sizes[rows] = np.stack([W.numpy(), H.numpy(), ok.numpy().astype(np.int32)], 1)
             done += len(rows)
             missing += int((~ok).sum())
             if bi % 200 == 0 or done == len(ds):
-                g_mm.flush(); c_mm.flush(); sizes.flush()
+                c_mm.flush(); sizes.flush()
+                if g_mm is not None:
+                    g_mm.flush()
                 with open(prog_path, "w") as f:
                     json.dump({"next": int(rows.max()) + lo + 1}, f)
                 rate = done / (time.time() - t0)
                 print(f"{done}/{len(ds)} frames  {rate:.1f}/s  eta {(len(ds) - done) / max(rate, 1e-6) / 60:.1f} min"
                       f"  missing={missing}", flush=True)
-    g_mm.flush(); c_mm.flush(); sizes.flush()
+    c_mm.flush(); sizes.flush()
+    if g_mm is not None:
+        g_mm.flush()
     meta = {"shard": args.shard, "num_shards": args.num_shards, "lo": lo, "hi": hi, "dim": dim,
             "global_tokens": G, "crop_tokens": C, "encoder": args.encoder, "global_patches": args.global_patches,
-            "crop_patches": args.crop_patches, "crop_frac": args.crop_frac, "missing": missing,
+            "crop_patches": args.crop_patches, "crop_frac": args.crop_frac, "missing": missing, "mode": args.mode,
             "complete": not args.limit}
     with open(out_dir / f"meta_{tag}.json", "w") as f:
         json.dump(meta, f)

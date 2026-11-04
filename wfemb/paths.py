@@ -8,6 +8,9 @@ PREP = DATA / "prepared"          # sessions, events, splits, vocab
 KEYS = DATA / "keys"              # frozen text embeddings (instructions, paraphrases, typed text)
 FRAMES = DATA / "frames"          # frozen vision-encoder cache
 RUNS = DATA / "runs"              # checkpoints + logs
+# Regenerable extra caches live on the 60-day-TTL bulk share (keeps the ~2 TiB home quota free)
+BULK = Path(os.environ.get("WFEMB_BULK", "/nas/ttl=60d/dfeng/workflow-embeddings"))
+FRAMES_EFFECT = BULK / "frames_effect"   # next-frame crops around the previous action point
 
 ZIPS = {   # last part of each split archive; read in place with wfemb.splitzip (no merged copy: NAS quota)
     "ubuntu": RAW / "ubuntu_images" / "images.zip",

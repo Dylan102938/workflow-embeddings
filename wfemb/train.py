@@ -36,6 +36,8 @@ def get_args(argv=None):
     ap.add_argument("--k_min", type=float, default=1.0)
     ap.add_argument("--k_max", type=float, default=100.0)
     ap.add_argument("--use_crop", action="store_true")
+    ap.add_argument("--use_effect", action="store_true",
+                    help="append next-frame crop tokens around the previous action point (paths.FRAMES_EFFECT)")
     ap.add_argument("--prev_query", nargs="?", const="sum", default="", choices=["", "sum", "sep"],
                     help="frame pool also queried by the previous action: sum (same queries) or sep (own group)")
     # optimization
@@ -99,7 +101,8 @@ def main(argv=None):
         print(json.dumps(rec), flush=True)
 
     t0 = time.time()
-    data = SessionData(Path(args.frames_dir), use_crop=args.use_crop, frames_mode=args.frames_mode, device=device)
+    data = SessionData(Path(args.frames_dir), use_crop=args.use_crop, frames_mode=args.frames_mode, device=device,
+                       effect_dir=paths.FRAMES_EFFECT if args.use_effect else None)
     if args.center_keys:
         tr = data.indices("train")
         mu = data.keys[tr].mean(0, keepdims=True)

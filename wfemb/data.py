@@ -39,25 +39,33 @@ class Batch:
 
 
 class FrameStore:
-    """Concatenation of per-shard memmaps, addressed by global step index."""
+    """Concatenation of per-shard memmaps, addressed by global step index. Each frame's tokens are
+    [global grid | action crop (optional) | effect crop of the previous action (optional)]."""
     on_gpu = False
 
-    def __init__(self, frames_dir: Path, use_crop: bool):
+    def __init__(self, frames_dir: Path, use_crop: bool, effect_dir: Path | None = None):
         metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
         if not metas:
             raise FileNotFoundError(f"no frame cache in {frames_dir}")
-        self.shards = []
+        self.shards = []                      # (lo, hi, [token arrays in order])
+        n_eff = 0
         for mp in metas:
             m = json.load(open(mp))
             tag = Path(mp).stem.split("_", 1)[1]
-            g = np.load(frames_dir / f"global_{tag}.npy", mmap_mode="r")
-            c = np.load(frames_dir / f"crop_{tag}.npy", mmap_mode="r") if use_crop else None
-            self.shards.append((m["lo"], m["hi"], g, c))
+            parts = [np.load(frames_dir / f"global_{tag}.npy", mmap_mode="r")]
+            if use_crop:
+                parts.append(np.load(frames_dir / f"crop_{tag}.npy", mmap_mode="r"))
+            if effect_dir is not None:
+                me = json.load(open(effect_dir / f"meta_{tag}.json"))
+                assert (me["lo"], me["hi"]) == (m["lo"], m["hi"]), f"effect shard {tag} does not match"
+                parts.append(np.load(effect_dir / f"effect_{tag}.npy", mmap_mode="r"))
+                n_eff = me["crop_tokens"]
+            self.shards.append((m["lo"], m["hi"], parts))
         self.shards.sort(key=lambda s: s[0])
         self.use_crop = use_crop
         m0 = json.load(open(metas[0]))
         self.dim = m0["dim"]
-        self.n_tok = m0["global_tokens"] + (m0["crop_tokens"] if use_crop else 0)
+        self.n_tok = m0["global_tokens"] + (m0["crop_tokens"] if use_crop else 0) + n_eff
         self.lo = np.array([s[0] for s in self.shards])
         self.hi = np.array([s[1] for s in self.shards])
         self.total = int(self.hi.max())
@@ -67,15 +75,12 @@ class FrameStore:
         out = np.empty((len(gidx), self.n_tok, self.dim), np.uint16)
         sh = np.searchsorted(self.hi, gidx, side="right")
         for k in np.unique(sh):
-            lo, hi, g, c = self.shards[k]
+            lo, hi, parts = self.shards[k]
             sel = np.nonzero(sh == k)[0]
             rows = gidx[sel] - lo
             order = np.argsort(rows)          # sorted reads are friendlier to the page cache
             rs = rows[order]
-            gtok = g[rs]
-            if c is not None:
-                gtok = np.concatenate([gtok, c[rs]], axis=1)
-            out[sel[order]] = gtok
+            out[sel[order]] = np.concatenate([p[rs] for p in parts], axis=1)
         return out
 
 
@@ -84,23 +89,20 @@ class GPUFrameStore(FrameStore):
     on_gpu = True
     FP8_MAX = 448.0
 
-    def __init__(self, frames_dir: Path, use_crop: bool, device, chunk: int = 8192):
-        super().__init__(frames_dir, use_crop)
+    def __init__(self, frames_dir: Path, use_crop: bool, device, effect_dir: Path | None = None,
+                 chunk: int = 8192):
+        super().__init__(frames_dir, use_crop, effect_dir)
         self.device = device
         self.t = torch.empty((self.total, self.n_tok, self.dim), dtype=torch.uint8, device=device)
-        G = None
-        for lo, hi, g, c in self.shards:
-            G = g.shape[1]
+        for lo, hi, parts in self.shards:
             for a in range(0, hi - lo, chunk):
                 b = min(hi - lo, a + chunk)
-                parts = [g[a:b]] + ([c[a:b]] if c is not None else [])
-                for j, arr in enumerate(parts):
-                    x = torch.from_numpy(np.ascontiguousarray(arr).view(np.int16)).to(device).view(torch.bfloat16)
+                c0 = 0
+                for arr in parts:
+                    x = torch.from_numpy(np.ascontiguousarray(arr[a:b]).view(np.int16)).to(device).view(torch.bfloat16)
                     q = x.clamp(-self.FP8_MAX, self.FP8_MAX).to(torch.float8_e4m3fn).view(torch.uint8)
-                    if j == 0:
-                        self.t[lo + a:lo + b, :G] = q
-                    else:
-                        self.t[lo + a:lo + b, G:] = q
+                    self.t[lo + a:lo + b, c0:c0 + q.shape[1]] = q
+                    c0 += q.shape[1]
         torch.cuda.synchronize(device)
 
     def gather_torch(self, gidx: torch.Tensor) -> torch.Tensor:
@@ -113,7 +115,7 @@ class GPUFrameStore(FrameStore):
 
 class SessionData:
     def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "memmap",
-                 device=None):
+                 device=None, effect_dir: Path | None = None):
         with open(paths.PREP / "sessions.pkl", "rb") as f:
             self.sessions = pickle.load(f)
         ev = np.load(paths.PREP / "events.npz")
@@ -138,9 +140,9 @@ class SessionData:
         groups = {g: i for i, g in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.group = np.array([groups[s["group"]] for s in self.sessions])
         if frames_mode == "gpu_fp8":
-            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device)
+            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, effect_dir)
         else:
-            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop)
+            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, effect_dir)
         assert self.frames.total == int(self.offset[-1] + self.length[-1]), "frame cache / events mismatch"
 
     def indices(self, split: str) -> np.ndarray:

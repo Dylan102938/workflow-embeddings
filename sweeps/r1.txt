@@ -1,5 +1,6 @@
-# Round 1: the v1 pseudocode configuration plus single-factor ablations (one run per GPU).
+# Round 1: the v1 pseudocode configuration plus single-factor ablations (one run per GPU job).
 --run r1_v1 --seed 0
 --run r1_crop --seed 0 --use_crop
 --run r1_nopara --seed 0 --no_para
 --run r1_drop01 --seed 0 --dropout 0.1
+--run r1_v1_memmap --seed 0 --frames_mode memmap

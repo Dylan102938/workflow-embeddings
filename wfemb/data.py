@@ -192,8 +192,10 @@ class SessionData:
 
 
 def length_bucketed_batches(lengths: np.ndarray, idx: np.ndarray, batch: int, rng: np.random.Generator,
-                            bucket_mult: int = 50, drop_last: bool = True) -> list[np.ndarray]:
-    """Shuffle, then sort within large buckets so each batch pads among similar lengths."""
+                            bucket_mult: int = 50, drop_last: bool = True,
+                            max_frames: int | None = None) -> list[np.ndarray]:
+    """Shuffle, then sort within large buckets so each batch pads among similar lengths.
+    max_frames caps B x T: batches of very long sessions are split instead of truncating sessions."""
     perm = rng.permutation(idx)
     out = []
     span = batch * bucket_mult
@@ -202,8 +204,12 @@ def length_bucketed_batches(lengths: np.ndarray, idx: np.ndarray, batch: int, rn
         chunk = chunk[np.argsort(lengths[chunk], kind="stable")]
         for b in range(0, len(chunk), batch):
             bb = chunk[b:b + batch]
-            if len(bb) == batch or not drop_last:
-                out.append(bb)
+            if len(bb) < batch and drop_last:
+                continue
+            T = int(lengths[bb].max())
+            step = max(1, max_frames // T) if max_frames and len(bb) * T > max_frames else len(bb)
+            for c in range(0, len(bb), step):
+                out.append(bb[c:c + step])
     order = rng.permutation(len(out))
     return [out[i] for i in order]
 

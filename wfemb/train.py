@@ -42,6 +42,7 @@ def get_args(argv=None):
     ap.add_argument("--epochs", type=float, default=30)
     ap.add_argument("--warmup", type=int, default=500)
     ap.add_argument("--max_len", type=int, default=0)
+    ap.add_argument("--step_drop", type=float, default=0.0, help="training-time intermediate-step dropout")
     ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
     # loss
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
@@ -145,7 +146,8 @@ def main(argv=None):
     done = False
     while not done:
         batches = length_bucketed_batches(data.length, train_idx, args.batch, rng, max_frames=args.max_frames)
-        it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None))
+        it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None, step_drop=args.step_drop,
+                             seed=args.seed * 1000 + epoch))
         while True:
             tw = time.time()
             try:

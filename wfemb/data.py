@@ -146,13 +146,31 @@ class SessionData:
     def indices(self, split: str) -> np.ndarray:
         return np.nonzero(self.split == split)[0]
 
-    def make_batch(self, sidx: np.ndarray, max_len: int | None = None) -> Batch:
-        lens = self.length[sidx].astype(np.int64)
-        if max_len:
-            lens = np.minimum(lens, max_len)
-        B, T = len(sidx), int(lens.max())
+    def make_batch(self, sidx: np.ndarray, max_len: int | None = None, step_drop: float = 0.0,
+                   seed: int | None = None) -> Batch:
+        """step_drop > 0 (training only): each intermediate step is dropped with that probability; the final
+        step (real final screen) is always kept, and the order of the kept steps is preserved."""
+        if step_drop > 0:
+            rng = np.random.default_rng(seed)
+            rows = []
+            for s in sidx:
+                L = int(self.length[s])
+                keep = rng.random(L) >= step_drop
+                keep[-1] = True
+                kept = np.nonzero(keep)[0]
+                if max_len:
+                    kept = kept[:max_len]
+                rows.append(self.offset[s] + kept)
+            lens = np.array([len(r) for r in rows], np.int64)
+            B, T = len(sidx), int(lens.max())
+            gidx = np.stack([np.concatenate([r, np.full(T - len(r), r[-1])]) for r in rows])
+        else:
+            lens = self.length[sidx].astype(np.int64)
+            if max_len:
+                lens = np.minimum(lens, max_len)
+            B, T = len(sidx), int(lens.max())
+            gidx = (self.offset[sidx][:, None] + np.minimum(np.arange(T)[None, :], lens[:, None] - 1))
         valid = np.arange(T)[None, :] < lens[:, None]
-        gidx = (self.offset[sidx][:, None] + np.minimum(np.arange(T)[None, :], lens[:, None] - 1))
         flat = gidx.reshape(-1)
         if self.frames.on_gpu:
             frames = torch.empty(0, dtype=torch.bfloat16)          # filled on the GPU by finalize()
@@ -218,13 +236,13 @@ class Prefetcher:
     """Builds batches on background threads (in order) and moves them to the GPU (pinned, non_blocking)."""
 
     def __init__(self, data: SessionData, batches: list[np.ndarray], device, extra=None, depth: int = 6,
-                 threads: int = 3, max_len: int | None = None):
+                 threads: int = 3, max_len: int | None = None, step_drop: float = 0.0, seed: int = 0):
         self.data, self.batches, self.device, self.extra, self.max_len = data, batches, device, extra, max_len
-        self.depth = depth
+        self.depth, self.step_drop, self.seed = depth, step_drop, seed
         self.pool = ThreadPoolExecutor(threads)
 
     def _make(self, i):
-        b = self.data.make_batch(self.batches[i], self.max_len)
+        b = self.data.make_batch(self.batches[i], self.max_len, self.step_drop, self.seed * 1_000_003 + i)
         b = Batch(**{k: v.pin_memory() for k, v in b.__dict__.items()})
         ex = self.extra(self.batches[i]) if self.extra else None
         return b, ex

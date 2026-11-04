@@ -62,15 +62,16 @@ def main():
     msgs = [[{"role": "user", "content": PROMPT.format(n=args.n, instruction=ins)}] for ins in instructions]
     outs = llm.chat(msgs, sp, use_tqdm=True)
 
-    result, short = {}, 0
+    result, raw, short = {}, {}, 0
     for ins, o in zip(instructions, outs):
-        paras = [p for p in parse_list(o.outputs[0].text, args.n) if p.lower() != ins.lower()]
+        raw[ins] = o.outputs[0].text
+        paras = [p for p in parse_list(raw[ins], args.n) if p.lower() != ins.lower()]
         short += len(paras) < args.n
         result[ins] = paras
     paths.KEYS.mkdir(parents=True, exist_ok=True)
     out_path = paths.KEYS / "paraphrases.json"
     with open(out_path, "w") as f:
-        json.dump({"model": args.model, "n": args.n, "paraphrases": result}, f)
+        json.dump({"model": args.model, "n": args.n, "paraphrases": result, "raw": raw}, f)
     print(f"wrote {out_path}; {short} instructions got fewer than {args.n} paraphrases")
     for ins in instructions[:5]:
         print("\n#", ins)

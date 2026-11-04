@@ -118,9 +118,6 @@ def main(argv=None):
                    "slurm_job": os.environ.get("SLURM_JOB_ID")}, f, indent=1)
     print(f"{n_params / 1e6:.2f}M params, {total} steps ({steps_per_epoch}/epoch)", flush=True)
 
-    def extra(bidx):
-        return torch.from_numpy(data.sample_positive_keys(bidx, rng)).pin_memory()
-
     best = {"loss": float("inf"), "key_R@5": -1.0, "session_R@5_cross_app": -1.0}
     step, epoch = 0, 0
     t_last, data_wait = time.time(), 0.0
@@ -128,16 +125,18 @@ def main(argv=None):
     done = False
     while not done:
         batches = length_bucketed_batches(data.length, train_idx, args.batch, rng)
-        it = iter(Prefetcher(data, batches, device, extra=extra, max_len=args.max_len or None))
+        it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None))
         while True:
             tw = time.time()
             try:
-                b, pos_keys = next(it)
+                b, _ = next(it)
             except StopIteration:
                 break
             data_wait += time.time() - tw
-            pos_keys = pos_keys.to(device, non_blocking=True)
-            target = torch.from_numpy(pos_in_U[b.idx.cpu().numpy()]).to(device)
+            bidx = b.idx.cpu().numpy()
+            # paraphrase augmentation: a random wording of each instruction, re-drawn every time (main thread rng)
+            pos_keys = torch.from_numpy(data.sample_positive_keys(bidx, rng)).to(device, non_blocking=True)
+            target = torch.from_numpy(pos_in_U[bidx]).to(device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 d, k = model(b)
             fn = false_negative_mask(U, gU, U[target], gU[target], target, args.theta_fn)

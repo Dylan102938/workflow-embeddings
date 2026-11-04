@@ -287,8 +287,14 @@ def dense_main(args):
     grid = (args.grid, args.grid)
     if qwen:
         from transformers import Qwen2_5_VLForConditionalGeneration
+        try:                                           # varlen windowed attention; batches several screenshots
+            import flash_attn  # noqa: F401
+            attn = "flash_attention_2"
+        except ImportError:
+            attn = "sdpa"
+        print(f"qwen vision attention: {attn}", flush=True)
         full = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.qwen_model, torch_dtype=torch.bfloat16,
-                                                                  attn_implementation="sdpa", low_cpu_mem_usage=True)
+                                                                  attn_implementation=attn, low_cpu_mem_usage=True)
         vision = (full.visual if hasattr(full, "visual") else full.model.visual).cuda().eval()
         del full
         dim = vision.merger.mlp[-1].out_features
@@ -299,14 +305,21 @@ def dense_main(args):
             return torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
                                                collate_fn=collate_list, prefetch_factor=4)
 
+        def pool_one(h, thw):
+            gh, gw = int(thw[1]) // merge, int(thw[2]) // merge
+            x = h.view(gh, gw, -1).permute(2, 0, 1)[None].float()
+            return F.adaptive_avg_pool2d(x, grid)[0].flatten(1).T
+
         def encode_batch(batch):
             gi, ok, pvs, thws = batch
-            outs = []
-            for pv, thw in zip(pvs, thws):        # one screenshot per forward: the sdpa path builds a dense mask
-                h = vision(pv.cuda(non_blocking=True).to(torch.bfloat16), grid_thw=thw[None].cuda())
-                gh, gw = int(thw[1]) // merge, int(thw[2]) // merge
-                x = h.view(gh, gw, -1).permute(2, 0, 1)[None].float()
-                outs.append(F.adaptive_avg_pool2d(x, grid)[0].flatten(1).T)
+            if attn == "flash_attention_2":        # whole batch in one varlen forward
+                thw = torch.stack(thws)
+                h = vision(torch.cat(pvs).cuda(non_blocking=True).to(torch.bfloat16), grid_thw=thw.cuda())
+                n = (thw.prod(1) // (merge * merge)).tolist()
+                outs = [pool_one(hi, t) for hi, t in zip(h.split(n), thws)]
+            else:                                  # sdpa builds a dense mask: one screenshot per forward
+                outs = [pool_one(vision(pv.cuda(non_blocking=True).to(torch.bfloat16), grid_thw=t[None].cuda()), t)
+                        for pv, t in zip(pvs, thws)]
             return gi, ok, torch.stack(outs)                               # [B, grid^2, dim] fp32
     else:
         from transformers import Siglip2VisionModel

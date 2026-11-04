@@ -14,8 +14,21 @@ def false_negative_mask(U: torch.Tensor, cand_group: torch.Tensor, own_key: torc
     return m
 
 
-def step_logits(d, k, U, pos_keys, target, fn_mask):
-    """d: [B,T,D] k: [B,T,1] U: [N,D] pos_keys: [B,D] target: [B] -> logits [B,T,N] (fp32)."""
+def step_logits(d, k, U, pos_keys, target, fn_mask, logpi=None):
+    """d: [B,T,D] k: [B,T,1] U: [N,D] pos_keys: [B,D] target: [B] -> logits [B,T,N] (fp32).
+    Mixture (logpi [B,T,K], d [B,T,K,D], k [B,T,K,1]): returns log p = log sum_k pi_k softmax(kappa_k d_k . U),
+    already normalized, so downstream log_softmax / cross_entropy / ranking are unchanged."""
+    if logpi is not None:
+        d, k = d.float(), k.float()
+        B, T, K, _ = d.shape
+        comp = k * torch.einsum("btkd,nd->btkn", d, U)
+        pos = k.squeeze(-1) * torch.einsum("btkd,bd->btk", d, pos_keys)
+        # Finite fill inside the mixture: logsumexp over all -inf entries has a NaN gradient. Masked columns are
+        # set to -inf only after combining (masked_fill passes no gradient there).
+        comp = comp.masked_fill(fn_mask[:, None, None, :], -1e4)
+        comp = comp.scatter(3, target.view(B, 1, 1, 1).expand(B, T, K, 1), pos[..., None])
+        logp = torch.logsumexp(logpi.float()[..., None] + comp.log_softmax(-1), dim=2)
+        return logp.masked_fill(fn_mask[:, None, :], float("-inf"))
     d, k = d.float(), k.float()
     logits = k * torch.einsum("btd,nd->btn", d, U)
     pos = k.squeeze(-1) * torch.einsum("btd,bd->bt", d, pos_keys)        # paraphrased positive
@@ -36,9 +49,9 @@ def smooth_targets(U, own_key, target, fn_mask, eps, tau):
     return q
 
 
-def info_nce(d, k, valid, U, pos_keys, target, fn_mask, return_steps=False, soft_targets=None):
+def info_nce(d, k, valid, U, pos_keys, target, fn_mask, return_steps=False, soft_targets=None, logpi=None):
     """soft_targets [B, N] (training-time label smoothing) replaces the one-hot target when given."""
-    logits = step_logits(d, k, U, pos_keys, target, fn_mask)
+    logits = step_logits(d, k, U, pos_keys, target, fn_mask, logpi)
     B, T, N = logits.shape
     if soft_targets is None:
         ce = F.cross_entropy(logits.reshape(B * T, N), target.repeat_interleave(T), reduction="none").view(B, T)

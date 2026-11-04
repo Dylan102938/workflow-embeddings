@@ -19,24 +19,39 @@ from .loss import false_negative_mask, info_nce
 
 @torch.no_grad()
 def embed_split(model, data: SessionData, sidx: np.ndarray, device, batch: int = 64, max_frames: int = 4096):
-    """Returns d [S, T_max, D] fp16, k [S, T_max] fp32, lengths [S] (CPU), in the order of sidx."""
+    """Returns d [S, T_max, (K,) D] fp16, k [S, T_max, (K)] fp32, log pi [S, T_max, K] or None, lengths [S]
+    (CPU), in the order of sidx."""
     model.eval()
     T_max = int(data.length[sidx].max())
-    D = model.cfg.d_key
-    d_all = torch.zeros(len(sidx), T_max, D, dtype=torch.float16)
-    k_all = torch.zeros(len(sidx), T_max)
+    D, K = model.cfg.d_key, model.cfg.n_mix
+    shape = (len(sidx), T_max) + ((K,) if K > 1 else ())
+    d_all = torch.zeros(*shape, D, dtype=torch.float16)
+    k_all = torch.zeros(*shape)
+    lp_all = torch.zeros(len(sidx), T_max, K) if K > 1 else None
     pos = {int(s): i for i, s in enumerate(sidx)}
     rng = np.random.default_rng(0)
     for bidx in length_bucketed_batches(data.length, sidx, batch, rng, drop_last=False, max_frames=max_frames):
         b = data.finalize(data.make_batch(bidx).to(device))
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            d, k = model(b)
+            d, k, logpi = model(b)
         rows = [pos[int(s)] for s in bidx]
         T = d.shape[1]
         d_all[rows, :T] = d.half().cpu()
         k_all[rows, :T] = k.squeeze(-1).float().cpu()
+        if lp_all is not None:
+            lp_all[rows, :T] = logpi.float().cpu()
     model.train()
-    return d_all, k_all, torch.from_numpy(data.length[sidx].astype(np.int64))
+    return d_all, k_all, lp_all, torch.from_numpy(data.length[sidx].astype(np.int64))
+
+
+def terminal_embedding(d_all, lp_all, lens):
+    """Retrieval embedding at the last step: d_T, or for a mixture the pi-weighted mean direction."""
+    S = len(lens)
+    dT = d_all[torch.arange(S), lens - 1].float()
+    if lp_all is None:
+        return dT
+    w = lp_all[torch.arange(S), lens - 1].exp()                          # [S, K]
+    return F.normalize((w[..., None] * dT).sum(1), dim=-1)
 
 
 def _retrieval(E: torch.Tensor, groups: np.ndarray, apps: np.ndarray, within_app: bool):
@@ -152,7 +167,8 @@ def evaluate(model, data: SessionData, split: str, device, theta_fn: float, U_tr
     sidx = data.indices(split)
     if max_sessions and len(sidx) > max_sessions:
         sidx = np.sort(np.random.default_rng(0).choice(sidx, max_sessions, replace=False))
-    d_all, k_all, lens = embed_split(model, data, sidx, device)
+    d_all, k_all, lp_all, lens = embed_split(model, data, sidx, device)
+    mix = lp_all is not None
     U_split = torch.from_numpy(data.keys[sidx]).to(device)
     U_ref = torch.cat([U_train, U_split])
     g_ref = torch.from_numpy(np.concatenate([data.group[train_idx], data.group[sidx]])).to(device)
@@ -163,17 +179,19 @@ def evaluate(model, data: SessionData, split: str, device, theta_fn: float, U_tr
     T_bins = 10
     ent_bins = np.zeros(T_bins); rank_bins = np.zeros(T_bins); r5_bins = np.zeros(T_bins); n_bins = np.zeros(T_bins)
     ent_abs = collections.defaultdict(list)
-    for s0 in range(0, S, 64):
-        sl = slice(s0, min(S, s0 + 64))
+    chunk = max(8, 64 // (lp_all.shape[-1] if mix else 1))               # mixture scores are K x larger
+    for s0 in range(0, S, chunk):
+        sl = slice(s0, min(S, s0 + chunk))
         L = lens[sl].to(device)
         T = int(L.max())
         d = d_all[sl, :T].to(device).float()
-        k = k_all[sl, :T, None].to(device)
+        k = k_all[sl, :T, ..., None].to(device)
+        logpi = lp_all[sl, :T].to(device) if mix else None
         valid = torch.arange(T, device=device)[None, :] < L[:, None]
         target = torch.arange(sl.start, sl.stop, device=device) + n_tr
         own = U_ref[target]
         fn = false_negative_mask(U_ref, g_ref, own, g_ref[target], target, theta_fn)
-        loss, ce, logits = info_nce(d, k, valid.float(), U_ref, own, target, fn, return_steps=True)
+        loss, ce, logits = info_nce(d, k, valid.float(), U_ref, own, target, fn, return_steps=True, logpi=logpi)
         B = d.shape[0]
         tot_loss += loss.item() * B
         last = L - 1
@@ -202,19 +220,20 @@ def evaluate(model, data: SessionData, split: str, device, theta_fn: float, U_tr
         p_true_last.append(pl.gather(1, target[:, None]).squeeze(1).cpu())
 
     ranks_last = torch.cat(ranks_last).float()
+    kap = (lp_all.exp() * k_all).sum(-1) if mix else k_all                # pi-weighted kappa for mixtures
     out = {
         "loss": tot_loss / S, "loss_last": tot_last / S,
         "key_R@1": float((ranks_last <= 1).float().mean()), "key_R@5": float((ranks_last <= 5).float().mean()),
         "key_R@10": float((ranks_last <= 10).float().mean()), "key_MRR": float((1.0 / ranks_last).mean()),
         "key_median_rank": float(ranks_last.median()),
-        "kappa_first": float(k_all[:, 0].mean()), "kappa_last": float(k_all[torch.arange(S), lens - 1].mean()),
+        "kappa_first": float(kap[:, 0].mean()), "kappa_last": float(kap[torch.arange(S), lens - 1].mean()),
         "entropy_vs_relpos": (ent_bins / np.maximum(n_bins, 1)).round(3).tolist(),
         "true_key_R@5_vs_relpos": (r5_bins / np.maximum(n_bins, 1)).round(3).tolist(),
         "entropy_vs_t": [round(float(np.mean(ent_abs[t])), 3) for t in sorted(ent_abs)],
         "calibration_ECE": _ece(torch.cat(conf_last).numpy(), torch.cat(correct_last).numpy().astype(float)),
         "n_sessions": S, "n_candidates": int(U_ref.shape[0]),
     }
-    E = d_all[torch.arange(S), lens - 1]                                 # terminal direction
+    E = terminal_embedding(d_all, lp_all, lens)                          # terminal direction
     groups = data.group[sidx]
     apps = np.array([data.sessions[i]["app"] for i in sidx])
     out.update(_retrieval(E, groups, apps, within_app=False))

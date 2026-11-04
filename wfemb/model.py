@@ -35,6 +35,7 @@ class ModelConfig:
     prev_query: str = ""     # "" | "sum" (prev action added to the same queries) | "sep" (its own query group)
     gru_layers: int = 1      # stacked recurrent cells; the state is their concatenation, heads read the top one
     keep_bias: float = 0.0   # added to the GRU update-gate bias at init (> 0 = biased toward keeping the state)
+    n_mix: int = 1           # readout components (pseudocode upgrade 1: K directions with mixture weights)
 
 
 class Fourier(nn.Module):
@@ -138,10 +139,16 @@ class SessionStateMachine(nn.Module):
             with torch.no_grad():                                        # gate order (r, z, n); h' = (1-z) n + z h
                 for c in [self.cell, *self.cells_extra]:
                     c.bias_ih[H:2 * H] += cfg.keep_bias
-        self.dir_head = nn.Linear(H, cfg.d_key)
-        self.conf_head = nn.Linear(H, 1)
+        K = cfg.n_mix
+        self.dir_head = nn.Linear(H, cfg.d_key * K)
+        self.conf_head = nn.Linear(H, K)
         nn.init.zeros_(self.conf_head.weight)
         nn.init.constant_(self.conf_head.bias, math.log(math.expm1(cfg.k_init - cfg.k_min)))
+        self.mix_head = None
+        if K > 1:                                                        # mixture weights, uniform at init
+            self.mix_head = nn.Linear(H, K)
+            nn.init.zeros_(self.mix_head.weight)
+            nn.init.zeros_(self.mix_head.bias)
 
     def inputs(self, b):
         """z_t for every step. It does not depend on h, so all steps are computed in parallel."""
@@ -156,10 +163,14 @@ class SessionStateMachine(nn.Module):
         return self.drop(self.fuse(torch.cat([f, a], -1)))
 
     def heads(self, h):
+        """K = 1: d [.., D], k [.., 1], None.   K > 1: d [.., K, D], k [.., K, 1], log pi [.., K]."""
         h = h[..., -self.cfg.h:]                                                         # top recurrent layer
-        d = F.normalize(self.dir_head(h).float(), dim=-1)                               # intent direction
         k = (F.softplus(self.conf_head(h).float()) + self.cfg.k_min).clamp(max=self.cfg.k_max)  # confidence
-        return d, k
+        if self.mix_head is None:
+            return F.normalize(self.dir_head(h).float(), dim=-1), k, None              # intent direction
+        K = self.cfg.n_mix
+        d = F.normalize(self.dir_head(h).float().view(*h.shape[:-1], K, -1), dim=-1)
+        return d, k.unsqueeze(-1), self.mix_head(h).float().log_softmax(-1)
 
     def step(self, h, z):
         H = self.cfg.h
@@ -180,4 +191,4 @@ class SessionStateMachine(nn.Module):
             h = torch.where(b.valid[:, t, None], h_new, h)               # freeze state after a session ends
             hs.append(h)
         hs = self.drop(torch.stack(hs, 1))
-        return self.heads(hs)                                            # [B, T, D], [B, T, 1]
+        return self.heads(hs)                                            # d, kappa, log pi (None if K = 1)

@@ -53,6 +53,7 @@ def get_args(argv=None):
                     help="linearly decay step dropout to 0 over this final fraction of the epochs")
     ap.add_argument("--gru_layers", type=int, default=1)
     ap.add_argument("--keep_bias", type=float, default=0.0, help="GRU update-gate bias toward keeping state")
+    ap.add_argument("--n_mix", type=int, default=1, help="readout components (mixture of directions)")
     ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
     # loss
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
@@ -135,7 +136,7 @@ def main(argv=None):
                       n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
                       k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
                       tok_drop=args.tok_drop, prev_query=args.prev_query, gru_layers=args.gru_layers,
-                      keep_bias=args.keep_bias)
+                      keep_bias=args.keep_bias, n_mix=args.n_mix)
     model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
     ema = None
     if args.ema > 0:
@@ -199,11 +200,11 @@ def main(argv=None):
                 U_step = U
                 pos_keys = torch.from_numpy(data.sample_positive_keys(bidx, rng)).to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                d, k = model(b)
+                d, k, logpi = model(b)
             fn = false_negative_mask(U, gU, U[target], gU[target], target, args.theta_fn)
             soft = (smooth_targets(U, U[target], target, fn, args.label_smooth, args.smooth_tau)
                     if args.label_smooth > 0 else None)
-            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn, soft_targets=soft)
+            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn, soft_targets=soft, logpi=logpi)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

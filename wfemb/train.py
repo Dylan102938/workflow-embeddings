@@ -40,7 +40,8 @@ def get_args(argv=None):
     ap.add_argument("--warmup", type=int, default=500)
     ap.add_argument("--max_len", type=int, default=0)
     # loss
-    ap.add_argument("--theta_fn", type=float, default=0.85)
+    ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
+    ap.add_argument("--eval_theta_fn", type=float, default=0.9, help="fixed across runs so val metrics compare")
     ap.add_argument("--no_para", action="store_true", help="disable paraphrase augmentation")
     ap.add_argument("--center_keys", action="store_true", help="subtract the train-key mean, renormalize")
     # eval / logging
@@ -121,7 +122,6 @@ def main(argv=None):
         return torch.from_numpy(data.sample_positive_keys(bidx, rng)).pin_memory()
 
     best = {"loss": float("inf"), "key_R@5": -1.0, "session_R@5_cross_app": -1.0}
-    sign = 1.0 if args.select_on == "loss" else -1.0
     step, epoch = 0, 0
     t_last, data_wait = time.time(), 0.0
     run_loss, run_n = 0.0, 0
@@ -157,7 +157,7 @@ def main(argv=None):
                      "steps_per_s": args.log_every / dt, "data_wait_frac": data_wait / dt})
                 t_last, data_wait, run_loss, run_n = time.time(), 0.0, 0.0, 0
             if step % args.eval_every == 0 or step == total:
-                m = evaluate(model, data, "val", device, args.theta_fn, U, train_idx)
+                m = evaluate(model, data, "val", device, args.eval_theta_fn, U, train_idx)
                 rec = {"step": step, "epoch": epoch, **{f"val_{k_}": v for k_, v in m.items()}}
                 log(rec)
                 state = {"model": model.state_dict(), "cfg": dataclasses.asdict(cfg), "args": vars(args),
@@ -179,7 +179,7 @@ def main(argv=None):
     model.load_state_dict(state["model"])
     final = {"best_step": state["step"], "best": best, "select_on": args.select_on}
     for split in ("val", "test"):
-        m = evaluate(model, data, split, device, args.theta_fn, U, train_idx, full=True)
+        m = evaluate(model, data, split, device, args.eval_theta_fn, U, train_idx, full=True)
         final[split] = m
     with open(run_dir / "final.json", "w") as f:
         json.dump(final, f, indent=1)

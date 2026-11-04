@@ -1,0 +1,19 @@
+{
+ "model": "text-embedding-3-large",
+ "dim": 3072,
+ "label_source": "openai",
+ "input_text_vecs": "Qwen3-0.6B",
+ "theta_para": 0.8019588589668274,
+ "para_total": 127463,
+ "para_kept": 118158,
+ "para_sim_quantiles": {
+  "0.05": 0.7848324179649353,
+  "0.25": 0.8616659641265869,
+  "0.5": 0.9028902649879456,
+  "0.75": 0.9370676279067993,
+  "0.95": 0.9691058993339539
+ },
+ "sessions_with_paraphrase": 20862,
+ "api_tokens": 6672138,
+ "approx_cost_usd": 0.87
+}

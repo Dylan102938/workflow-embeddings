@@ -1,0 +1,40 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{font-family:var(--font-sans);color:var(--foreground)}
+*{box-sizing:border-box}body{margin:0}.meta{color:var(--muted-foreground);margin:0 0 18px}.diagram{position:relative;padding:0 32px}.nodes{display:grid;grid-template-columns:1fr 1fr;gap:40px 20px;position:relative}.node{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;text-align:center;position:relative;z-index:1}.name{font-weight:500;margin-bottom:6px}.sub{color:var(--muted-foreground)}.line{margin-top:7px}.wide{grid-column:1/-1;width:80%;justify-self:center}.attn{background:color-mix(in srgb,var(--chart-1) 9%,var(--card));border-color:var(--chart-1)}.frozen{border-style:dashed}.mono{font-family:var(--font-mono)}.edges{position:absolute;inset:0;overflow:visible;pointer-events:none}.edges path{fill:none;stroke:var(--muted-foreground);stroke-width:1.4}.edges .loop{stroke:var(--chart-1)}.edges text{fill:var(--foreground)}.training{margin-top:40px;border-top:1px dashed var(--border);padding-top:18px;text-align:center}.training .name{margin-bottom:10px}.train-flow{display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap}.train-flow>div{flex:1;min-width:190px}.settings{margin-top:18px;color:var(--muted-foreground);text-align:center}.training .target{padding:12px 0}.legend{margin-top:14px;text-align:center;color:var(--muted-foreground)}
+@media(max-width:480px){.diagram{padding:0 23px}.nodes{column-gap:10px;row-gap:34px}.node{padding:12px 8px}.wide{width:90%}.meta{text-align:center}.train-flow{gap:4px;flex-direction:column}.train-flow>div{min-width:240px}.train-flow>span{transform:rotate(90deg)}}
+</style></head><body>
+<div id="workflow-architecture">
+<p class="meta">r16_oai_dense_hist · 10.94M trainable parameters</p>
+<div class="diagram" id="diagram">
+<svg class="edges" id="edges" aria-hidden="true"></svg>
+<div class="nodes">
+<div class="node frozen" id="screen"><div class="name">Screenshot at step t</div><div>Frozen SigLIP2-so400m</div><div class="sub">NaFlex · ≤1,024 patches</div><div class="line">Pool to 16 × 16 grid<br>PCA: 1,152 → 512 channels</div><div class="line mono">256 tokens × 512</div></div>
+<div class="node" id="action"><div class="name">Input events at step t</div><div>Type, coordinates, keys,<br>scroll and typed text</div><div class="sub line">Text: frozen Qwen3-0.6B<br>1,024 dimensions</div><div class="line">Event encoder → <span class="mono">aₜ: 384</span></div><div class="sub">Keep aₜ₋₁ for attention</div></div>
+<div class="node attn wide" id="attention"><div class="name">Cross-attention readout</div><div>8 action queries · 4 history · 4 static</div><div class="sub">Action: aₜ + aₜ₋₁ · history: hₜ₋₁</div><div class="line">16 output slots, each with 8 heads × 48 dims</div><div class="line mono">16 × 384 → linear → fₜ: 384</div></div>
+<div class="node wide" id="fuse"><div class="name">Combine screen + action</div><div class="mono">[fₜ, aₜ] → MLP: 768 → 768 → 384</div></div>
+<div class="node wide" id="gru"><div class="name">GRU + LayerNorm</div><div>1 layer · input 384 · state 512</div><div class="line mono">hₜ = update(hₜ₋₁, input)</div><div class="sub">Learned initial state h₀</div></div>
+<div class="node" id="direction"><div class="name">Intent embedding dₜ</div><div>Linear 512 → 3,072<br>L2 normalize</div></div>
+<div class="node" id="confidence"><div class="name">Confidence κₜ</div><div>Linear 512 → 1<br>Softplus + 1 · cap 50</div></div>
+</div></div>
+<div class="legend">State loops back for the next step. Outputs are produced at every step.</div>
+<div class="training"><div class="name">Training only</div><div class="train-flow"><div class="target">Instruction + paraphrases<br><span class="sub">Frozen OpenAI text-embedding-3-large</span><br><span class="mono">Target keys: 3,072 dimensions</span></div><span aria-hidden="true">→</span><div>Per-step InfoNCE loss<br><span class="mono">scores = κₜ · (dₜ · keys)</span><br><span class="sub">18,081 training candidates</span></div></div>
+<div class="settings">Dropout 0.3 · token / step dropout 0.4<br>Label smoothing 0.2 · near-duplicate threshold 0.8<br>AdamW · lr 5e−4 · weight decay 0.1 · EMA 0.999</div></div>
+</div>
+<script>
+(()=>{const root=document.getElementById('workflow-architecture'),canvas=root.querySelector('#diagram'),svg=root.querySelector('#edges');
+function draw(){const r=canvas.getBoundingClientRect(),w=r.width,h=r.height;svg.setAttribute('width',w);svg.setAttribute('height',h);svg.setAttribute('viewBox',`0 0 ${w} ${h}`);const box=id=>{let q=root.querySelector('#'+id).getBoundingClientRect();return{x:q.left-r.left,y:q.top-r.top,w:q.width,h:q.height,cx:q.left-r.left+q.width/2,cy:q.top-r.top+q.height/2,b:q.bottom-r.top,right:q.right-r.left}};
+const s=box('screen'),a=box('action'),p=box('attention'),f=box('fuse'),g=box('gru'),d=box('direction'),c=box('confidence');
+let out='<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 Z" style="fill:var(--muted-foreground);stroke:none"/></marker><marker id="loop-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 Z" style="fill:var(--chart-1);stroke:none"/></marker></defs>';
+const path=(v,loop=false)=>{out+=`<path d="${v}" class="${loop?'loop':''}" marker-end="url(#${loop?'loop-arrow':'arrow'})"/>`};
+path(`M ${s.cx} ${s.b} V ${p.y-18} H ${p.x+p.w*.25} V ${p.y-2}`);
+path(`M ${a.cx} ${a.b} V ${p.y-18} H ${p.x+p.w*.75} V ${p.y-2}`);
+path(`M ${p.cx} ${p.b} V ${f.y-2}`);path(`M ${f.cx} ${f.b} V ${g.y-2}`);
+path(`M ${a.right} ${a.cy} H ${w-9} V ${f.cy} H ${f.right+2}`);
+const by=g.b+17;path(`M ${g.cx} ${g.b} V ${by} H ${d.cx} V ${d.y-2}`);path(`M ${g.cx} ${by} H ${c.cx} V ${c.y-2}`);
+path(`M ${g.cx} ${by} H 9 V ${p.cy} H ${p.x-2}`,true);path(`M 9 ${g.cy} H ${g.x-2}`,true);
+out+=`<text transform="translate(22 ${(p.cy+g.cy)/2}) rotate(-90)" text-anchor="middle">hₜ₋₁ · 512</text><text transform="translate(${w-20} ${(a.cy+f.cy)/2}) rotate(90)" text-anchor="middle">aₜ · 384</text>`;
+svg.innerHTML=out;}
+new ResizeObserver(draw).observe(canvas);draw();})();
+</script></body></html>

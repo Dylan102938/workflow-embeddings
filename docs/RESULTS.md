@@ -82,8 +82,11 @@ Infrastructure:
   now live on `/nas/ttl=60d` (with a symlink at the old path).
 - **flash-attn.** A prebuilt 2.7.4 wheel matching torch 2.5.1/cu121 makes the Qwen2.5-VL vision cache about 5× faster
   (`scripts/install_flash_attn.sh`; install without dependencies).
-- **Next (round 17):** a Qwen2.5-VL-7B vision-tower dense cache (native resolution, about 1288×728) compared with
-  SigLIP2 under OpenAI labels.
+- **Round 17 (Qwen2.5-VL-7B vision tower; not completed).** The pipeline works end to end: the smoke tests pass,
+  and 512 PCA channels keep 97.6% of the variance on a 256-frame sample. The full cache was stopped when the user
+  asked to wrap up. It was CPU-bound in the data loader (Qwen2VLImageProcessor on a shared node, 2–5 frames/s at 0%
+  GPU utilization), so the cache would have needed several more hours. To finish it, move resize/normalize/patchify
+  onto the GPU, or use more CPU per shard, then run `sweeps/r17.txt`.
 
 ## Best configuration
 

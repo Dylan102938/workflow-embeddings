@@ -1,0 +1,156 @@
+{
+ "val/action_tfidf": {
+  "session_R@1_cross_app": 0.896551724137931,
+  "session_R@5_cross_app": 0.9310344827586207,
+  "session_MRR_cross_app": 0.9172500216057385,
+  "n_session_queries": 29,
+  "session_R@1_within_app": 0.9310344827586207,
+  "session_R@5_within_app": 1.0,
+  "session_MRR_within_app": 0.9655172413793104,
+  "jsession_nDCG@10_cross_app": 0.21997989671253193,
+  "n_jsession_queries_cross_app": 60,
+  "jsession_R@1_cross_app": 0.6833333333333333,
+  "jsession_R@5_cross_app": 0.75,
+  "jsession_MRR_cross_app": 0.7245381268566897,
+  "jsession_nDCG@10_within_app": 0.6729938851012723,
+  "n_jsession_queries_within_app": 58,
+  "jsession_R@1_within_app": 0.7586206896551724,
+  "jsession_R@5_within_app": 0.9482758620689655,
+  "jsession_MRR_within_app": 0.8446839080459769
+ },
+ "val/mean_frame": {
+  "session_R@1_cross_app": 1.0,
+  "session_R@5_cross_app": 1.0,
+  "session_MRR_cross_app": 1.0,
+  "n_session_queries": 29,
+  "session_R@1_within_app": 1.0,
+  "session_R@5_within_app": 1.0,
+  "session_MRR_within_app": 1.0,
+  "jsession_nDCG@10_cross_app": 0.499699088527769,
+  "n_jsession_queries_cross_app": 60,
+  "jsession_R@1_cross_app": 0.7833333333333333,
+  "jsession_R@5_cross_app": 0.8666666666666667,
+  "jsession_MRR_cross_app": 0.8109731807342462,
+  "jsession_nDCG@10_within_app": 0.68705819025356,
+  "n_jsession_queries_within_app": 58,
+  "jsession_R@1_within_app": 0.8448275862068966,
+  "jsession_R@5_within_app": 0.9137931034482759,
+  "jsession_MRR_within_app": 0.8766967706622879
+ },
+ "val/last_frame": {
+  "session_R@1_cross_app": 1.0,
+  "session_R@5_cross_app": 1.0,
+  "session_MRR_cross_app": 1.0,
+  "n_session_queries": 29,
+  "session_R@1_within_app": 1.0,
+  "session_R@5_within_app": 1.0,
+  "session_MRR_within_app": 1.0,
+  "jsession_nDCG@10_cross_app": 0.3923052267398761,
+  "n_jsession_queries_cross_app": 60,
+  "jsession_R@1_cross_app": 0.65,
+  "jsession_R@5_cross_app": 0.8,
+  "jsession_MRR_cross_app": 0.7047011716234856,
+  "jsession_nDCG@10_within_app": 0.6411447572654735,
+  "n_jsession_queries_within_app": 58,
+  "jsession_R@1_within_app": 0.7241379310344828,
+  "jsession_R@5_within_app": 0.896551724137931,
+  "jsession_MRR_within_app": 0.7886107427055703
+ },
+ "val/text_key_oracle": {
+  "session_R@1_cross_app": 1.0,
+  "session_R@5_cross_app": 1.0,
+  "session_MRR_cross_app": 1.0,
+  "n_session_queries": 29,
+  "session_R@1_within_app": 1.0,
+  "session_R@5_within_app": 1.0,
+  "session_MRR_within_app": 1.0,
+  "jsession_nDCG@10_cross_app": 0.7103867871758562,
+  "n_jsession_queries_cross_app": 60,
+  "jsession_R@1_cross_app": 0.65,
+  "jsession_R@5_cross_app": 0.9166666666666666,
+  "jsession_MRR_cross_app": 0.7548707680072709,
+  "jsession_nDCG@10_within_app": 0.8643074366662138,
+  "n_jsession_queries_within_app": 58,
+  "jsession_R@1_within_app": 0.7413793103448276,
+  "jsession_R@5_within_app": 0.9827586206896551,
+  "jsession_MRR_within_app": 0.8392446633825944
+ },
+ "val/ridge_bag_alpha10": {
+  "key_R@1": 0.10924370586872101,
+  "key_R@5": 0.2731092572212219,
+  "key_R@10": 0.36764708161354065,
+  "key_MRR": 0.1917455494403839,
+  "key_median_rank": 28.0
+ },
+ "val/ridge_bag_alpha100": {
+  "key_R@1": 0.1071428656578064,
+  "key_R@5": 0.267857164144516,
+  "key_R@10": 0.3560924530029297,
+  "key_MRR": 0.18701931834220886,
+  "key_median_rank": 30.0
+ },
+ "val/ridge_bag_alpha1000": {
+  "key_R@1": 0.08718487620353699,
+  "key_R@5": 0.22584034502506256,
+  "key_R@10": 0.3014706075191498,
+  "key_MRR": 0.16008442640304565,
+  "key_median_rank": 43.0
+ },
+ "test/action_tfidf": {
+  "session_R@1_cross_app": 0.8513513513513513,
+  "session_R@5_cross_app": 0.8918918918918919,
+  "session_MRR_cross_app": 0.8725244957714724,
+  "n_session_queries": 74,
+  "session_R@1_within_app": 0.7972972972972973,
+  "session_R@5_within_app": 0.9324324324324325,
+  "session_MRR_within_app": 0.8601812239263543
+ },
+ "test/mean_frame": {
+  "session_R@1_cross_app": 0.9054054054054054,
+  "session_R@5_cross_app": 0.9594594594594594,
+  "session_MRR_cross_app": 0.932572139808982,
+  "n_session_queries": 74,
+  "session_R@1_within_app": 0.8243243243243243,
+  "session_R@5_within_app": 0.9324324324324325,
+  "session_MRR_within_app": 0.8772723535174839
+ },
+ "test/last_frame": {
+  "session_R@1_cross_app": 0.8783783783783784,
+  "session_R@5_cross_app": 0.9459459459459459,
+  "session_MRR_cross_app": 0.9139952990039246,
+  "n_session_queries": 74,
+  "session_R@1_within_app": 0.8243243243243243,
+  "session_R@5_within_app": 0.9054054054054054,
+  "session_MRR_within_app": 0.8716858846957212
+ },
+ "test/text_key_oracle": {
+  "session_R@1_cross_app": 1.0,
+  "session_R@5_cross_app": 1.0,
+  "session_MRR_cross_app": 1.0,
+  "n_session_queries": 74,
+  "session_R@1_within_app": 0.9594594594594594,
+  "session_R@5_within_app": 0.9594594594594594,
+  "session_MRR_within_app": 0.9594795607246911
+ },
+ "test/ridge_bag_alpha10": {
+  "key_R@1": 0.08295082300901413,
+  "key_R@5": 0.18000000715255737,
+  "key_R@10": 0.2360655665397644,
+  "key_MRR": 0.13784240186214447,
+  "key_median_rank": 89.0
+ },
+ "test/ridge_bag_alpha100": {
+  "key_R@1": 0.08229508250951767,
+  "key_R@5": 0.1793442666530609,
+  "key_R@10": 0.23573771119117737,
+  "key_MRR": 0.13619491457939148,
+  "key_median_rank": 93.0
+ },
+ "test/ridge_bag_alpha1000": {
+  "key_R@1": 0.07180327922105789,
+  "key_R@5": 0.16032786667346954,
+  "key_R@10": 0.20885245501995087,
+  "key_MRR": 0.1199236586689949,
+  "key_median_rank": 115.0
+ }
+}

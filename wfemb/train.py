@@ -54,6 +54,11 @@ def get_args(argv=None):
     ap.add_argument("--gru_layers", type=int, default=1)
     ap.add_argument("--keep_bias", type=float, default=0.0, help="GRU update-gate bias toward keeping state")
     ap.add_argument("--n_mix", type=int, default=1, help="readout components (mixture of directions)")
+    ap.add_argument("--compress_latents", type=int, default=0, help="Perceiver-style learned compression latents")
+    ap.add_argument("--compress_blocks", type=int, default=1)
+    ap.add_argument("--hist_queries", type=int, default=0, help="readout queries from h[t-1] (sequential pooling)")
+    ap.add_argument("--static_queries", type=int, default=0, help="learned whole-screen readout queries")
+    ap.add_argument("--avg_grid", type=int, default=0, help="average-pool a dense global grid to this size on load")
     ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
     # loss
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
@@ -104,7 +109,7 @@ def main(argv=None):
     t0 = time.time()
     extras = [x for x in args.extra.split(",") if x] + (["effect"] if args.use_effect else [])
     data = SessionData(Path(args.frames_dir), use_crop=args.use_crop, frames_mode=args.frames_mode, device=device,
-                       extras=extras)
+                       extras=extras, avg_grid=args.avg_grid)
     if args.center_keys:
         tr = data.indices("train")
         mu = data.keys[tr].mean(0, keepdims=True)
@@ -137,7 +142,9 @@ def main(argv=None):
                       n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
                       k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
                       tok_drop=args.tok_drop, prev_query=args.prev_query, gru_layers=args.gru_layers,
-                      keep_bias=args.keep_bias, n_mix=args.n_mix)
+                      keep_bias=args.keep_bias, n_mix=args.n_mix, compress_latents=args.compress_latents,
+                      compress_blocks=args.compress_blocks, hist_queries=args.hist_queries,
+                      static_queries=args.static_queries)
     model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
     ema = None
     if args.ema > 0:

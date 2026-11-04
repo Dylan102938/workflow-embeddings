@@ -31,12 +31,12 @@ def main():
         state = torch.load(paths.RUNS / run / args.ckpt, map_location=device, weights_only=False)
         a = state["args"]
         extras = [x for x in a.get("extra", "").split(",") if x] + (["effect"] if a.get("use_effect") else [])
-        key = (bool(a.get("use_crop")), tuple(extras))
+        key = (bool(a.get("use_crop")), tuple(extras), a.get("frames_dir"), a.get("avg_grid", 0))
         if key != data_key:                      # reload frames only when the token layout changes
             data, data_key = None, None
             torch.cuda.empty_cache()
             data = SessionData(Path(a.get("frames_dir", paths.FRAMES)), use_crop=key[0], frames_mode="gpu_fp8",
-                               device=device, extras=list(extras))
+                               device=device, extras=list(extras), avg_grid=a.get("avg_grid", 0))
             data_key = key
         if a.get("center_keys"):
             raise NotImplementedError("center_keys runs: re-derive the key transform before evaluating")

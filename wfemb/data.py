@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from . import paths
 
@@ -43,7 +44,7 @@ class FrameStore:
     [global grid | action crop (optional) | effect crop of the previous action (optional)]."""
     on_gpu = False
 
-    def __init__(self, frames_dir: Path, use_crop: bool, extras: list[str] | tuple = ()):
+    def __init__(self, frames_dir: Path, use_crop: bool, extras: list[str] | tuple = (), avg_grid: int = 0):
         metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
         if not metas:
             raise FileNotFoundError(f"no frame cache in {frames_dir}")
@@ -67,7 +68,10 @@ class FrameStore:
         self.use_crop = use_crop
         m0 = json.load(open(metas[0]))
         self.dim = m0["dim"]
-        self.n_tok = m0["global_tokens"] + (m0["crop_tokens"] if use_crop else 0) + n_eff
+        self.grid = m0.get("grid", int(round(m0["global_tokens"] ** 0.5)))
+        self.avg_grid = avg_grid if avg_grid and avg_grid < self.grid else 0
+        n_global = self.avg_grid ** 2 if self.avg_grid else m0["global_tokens"]
+        self.n_tok = n_global + (m0["crop_tokens"] if use_crop else 0) + n_eff
         self.lo = np.array([s[0] for s in self.shards])
         self.hi = np.array([s[1] for s in self.shards])
         self.total = int(self.hi.max())
@@ -92,16 +96,21 @@ class GPUFrameStore(FrameStore):
     FP8_MAX = 448.0
 
     def __init__(self, frames_dir: Path, use_crop: bool, device, extras: list[str] | tuple = (),
-                 chunk: int = 8192):
-        super().__init__(frames_dir, use_crop, extras)
+                 chunk: int = 8192, avg_grid: int = 0):
+        super().__init__(frames_dir, use_crop, extras, avg_grid)
         self.device = device
         self.t = torch.empty((self.total, self.n_tok, self.dim), dtype=torch.uint8, device=device)
         for lo, hi, parts in self.shards:
             for a in range(0, hi - lo, chunk):
                 b = min(hi - lo, a + chunk)
                 c0 = 0
-                for arr in parts:
+                for j, arr in enumerate(parts):
                     x = torch.from_numpy(np.ascontiguousarray(arr[a:b]).view(np.int16)).to(device).view(torch.bfloat16)
+                    if j == 0 and self.avg_grid:                 # fixed averaging of the dense global grid
+                        g = self.grid
+                        x = F.adaptive_avg_pool2d(x.float().view(-1, g, g, x.shape[-1]).permute(0, 3, 1, 2),
+                                                  self.avg_grid).permute(0, 2, 3, 1).reshape(x.shape[0], -1,
+                                                                                             x.shape[-1])
                     q = x.clamp(-self.FP8_MAX, self.FP8_MAX).to(torch.float8_e4m3fn).view(torch.uint8)
                     self.t[lo + a:lo + b, c0:c0 + q.shape[1]] = q
                     c0 += q.shape[1]
@@ -117,7 +126,7 @@ class GPUFrameStore(FrameStore):
 
 class SessionData:
     def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "memmap",
-                 device=None, extras: list[str] | tuple = ()):
+                 device=None, extras: list[str] | tuple = (), avg_grid: int = 0):
         with open(paths.PREP / "sessions.pkl", "rb") as f:
             self.sessions = pickle.load(f)
         ev = np.load(paths.PREP / "events.npz")
@@ -142,8 +151,9 @@ class SessionData:
         groups = {g: i for i, g in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.group = np.array([groups[s["group"]] for s in self.sessions])
         if frames_mode == "gpu_fp8":
-            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, extras)
+            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, extras, avg_grid=avg_grid)
         else:
+            assert not avg_grid, "avg_grid needs frames_mode=gpu_fp8"
             self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, extras)
         assert self.frames.total == int(self.offset[-1] + self.length[-1]), "frame cache / events mismatch"
 

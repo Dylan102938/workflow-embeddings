@@ -1,0 +1,9 @@
+# Round 4: base = r3_small_sd30 (crop, para-neg, dropout 0.2, tok-drop 0.25, wd 0.1, d384/h512, step-drop 0.3):
+# val 4.645 / test 5.887. Ablate step-drop vs size, combine with kappa cap 50, push regularization/duration.
+--run r4_small_nosd --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512
+--run r4_small_sd30_k50 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.3 --k_max 50
+--run r4_small_sd50 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.5
+--run r4_tiny_sd30 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 256 --h 384 --step_drop 0.3
+--run r4_small_sd30_ep45 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.3 --epochs 45
+--run r4_big_sd30_lr5e4 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --step_drop 0.3 --lr 5e-4
+--run r4_small_sd30_seed1 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.3 --seed 1

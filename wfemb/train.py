@@ -47,6 +47,10 @@ def get_args(argv=None):
     ap.add_argument("--ema", type=float, default=0.0, help="EMA decay of weights used for eval/checkpoints (0 = off)")
     ap.add_argument("--max_len", type=int, default=0)
     ap.add_argument("--step_drop", type=float, default=0.0, help="training-time intermediate-step dropout")
+    ap.add_argument("--step_drop_anneal", type=float, default=0.0,
+                    help="linearly decay step dropout to 0 over this final fraction of the epochs")
+    ap.add_argument("--gru_layers", type=int, default=1)
+    ap.add_argument("--keep_bias", type=float, default=0.0, help="GRU update-gate bias toward keeping state")
     ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
     # loss
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
@@ -127,7 +131,8 @@ def main(argv=None):
     cfg = ModelConfig(d_key=U.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, d=args.d, h=args.h,
                       n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
                       k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
-                      tok_drop=args.tok_drop, prev_query=args.prev_query)
+                      tok_drop=args.tok_drop, prev_query=args.prev_query, gru_layers=args.gru_layers,
+                      keep_bias=args.keep_bias)
     model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
     ema = None
     if args.ema > 0:
@@ -165,7 +170,13 @@ def main(argv=None):
     done = False
     while not done:
         batches = length_bucketed_batches(data.length, train_idx, args.batch, rng, max_frames=args.max_frames)
-        it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None, step_drop=args.step_drop,
+        sd = args.step_drop
+        if args.step_drop_anneal > 0:
+            n_ep = total / steps_per_epoch
+            start = (1 - args.step_drop_anneal) * n_ep
+            if epoch >= start:
+                sd = args.step_drop * max(0.0, 1 - (epoch - start) / (args.step_drop_anneal * n_ep))
+        it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None, step_drop=sd,
                              seed=args.seed * 1000 + epoch))
         while True:
             tw = time.time()

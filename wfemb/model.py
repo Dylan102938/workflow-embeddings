@@ -33,6 +33,8 @@ class ModelConfig:
     dropout: float = 0.0
     tok_drop: float = 0.0    # training-time fraction of frame tokens hidden from the attention pool
     prev_query: str = ""     # "" | "sum" (prev action added to the same queries) | "sep" (its own query group)
+    gru_layers: int = 1      # stacked recurrent cells; the state is their concatenation, heads read the top one
+    keep_bias: float = 0.0   # added to the GRU update-gate bias at init (> 0 = biased toward keeping the state)
 
 
 class Fourier(nn.Module):
@@ -128,7 +130,14 @@ class SessionStateMachine(nn.Module):
         self.drop = nn.Dropout(cfg.dropout)
         self.cell = nn.GRUCell(d, H)                                     # gated recurrent state
         self.norm = nn.LayerNorm(H)
-        self.h0 = nn.Parameter(torch.zeros(H))
+        L = cfg.gru_layers
+        self.cells_extra = nn.ModuleList([nn.GRUCell(H, H) for _ in range(L - 1)])
+        self.norms_extra = nn.ModuleList([nn.LayerNorm(H) for _ in range(L - 1)])
+        self.h0 = nn.Parameter(torch.zeros(L * H))
+        if cfg.keep_bias:
+            with torch.no_grad():                                        # gate order (r, z, n); h' = (1-z) n + z h
+                for c in [self.cell, *self.cells_extra]:
+                    c.bias_ih[H:2 * H] += cfg.keep_bias
         self.dir_head = nn.Linear(H, cfg.d_key)
         self.conf_head = nn.Linear(H, 1)
         nn.init.zeros_(self.conf_head.weight)
@@ -147,12 +156,19 @@ class SessionStateMachine(nn.Module):
         return self.drop(self.fuse(torch.cat([f, a], -1)))
 
     def heads(self, h):
+        h = h[..., -self.cfg.h:]                                                         # top recurrent layer
         d = F.normalize(self.dir_head(h).float(), dim=-1)                               # intent direction
         k = (F.softplus(self.conf_head(h).float()) + self.cfg.k_min).clamp(max=self.cfg.k_max)  # confidence
         return d, k
 
     def step(self, h, z):
-        return self.norm(self.cell(z, h))
+        H = self.cfg.h
+        x = self.norm(self.cell(z, h[:, :H]))
+        outs = [x]
+        for l, (cell, norm) in enumerate(zip(self.cells_extra, self.norms_extra), start=1):
+            x = norm(cell(x, h[:, l * H:(l + 1) * H]))
+            outs.append(x)
+        return outs[0] if len(outs) == 1 else torch.cat(outs, -1)
 
     def forward(self, b):
         B, T = b.valid.shape

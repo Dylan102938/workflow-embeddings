@@ -34,6 +34,57 @@ Seed noise for the best config is about 0.02–0.03 on val loss and 0.05–0.09 
 | 8 | frame-pool queries also conditioned on the previous action | **4.078** | 5.152 |
 | 9–12 | separate prev-action queries, κ cap 75, keep-biased GRU gate, 2-layer GRU, width, next-frame crops, mixture readout | ≥ 4.068 (noise) | ≥ 5.074 (noise) |
 
+## Update: rounds 13–16 (A100s, no click-centered crops)
+
+Direction changes from the user (2026-11-04):
+- all GPU jobs on A100s at the `high` QOS;
+- test-set relevance labels;
+- stop click-centered crops; try history-conditioned visual attention and learned compression of dense whole-screen
+  features (Perceiver pattern);
+- training/eval labels from OpenAI's best embedding model, with the model's typed-text inputs kept on Qwen3-0.6B.
+
+**Test-set judged pool.** 16,885 pairs judged by Claude Opus 5.5 ($86.41): 357 same-workflow and 3,666 related. 525
+test sessions have a same-workflow partner, versus 60 in val, so test is now the reliable retrieval benchmark.
+
+| run (best-val-loss checkpoint) | labels | screen features | val loss | test loss | test R@5 | test MRR | test nDCG@10 |
+|---|---|---|---|---|---|---|---|
+| r8 best *with* click crops (reference) | Qwen | 8×8 + crop | 4.078 | 5.152 | 0.813 | 0.707 | 0.474 |
+| r14_nocrop | Qwen | 8×8 averaged | 4.242 | 5.331 | – | – | 0.452 |
+| r14_nocrop_hist / r15 seed 1 | Qwen | 8×8 + h[t−1] queries | 4.197 / 4.223 | 5.321 / 5.277 | 0.783 / 0.773 | 0.691 / 0.690 | 0.460 / 0.463 |
+| r14_dense_avg8 | Qwen | dense 16×16 → fixed avg 8×8 | 4.276 | 5.458 | – | – | 0.447 |
+| r14_dense_direct | Qwen | dense 16×16 (256 tokens) | 4.241 | 5.345 | – | – | 0.445 |
+| r14_dense_hist / r15 seed 1 | Qwen | dense + h[t−1] queries | 4.189 / 4.211 | 5.260 / 5.290 | 0.766 / 0.766 | 0.674 / 0.689 | 0.459 / 0.453 |
+| Perceiver (4 variants: 32/64/128 latents, 1–2 blocks) | Qwen | dense → learned latents | 4.35–4.42 | 5.56–5.73 | – | – | 0.43–0.45 |
+| r16_oai_dense_hist (2 seeds) | OpenAI | dense + h[t−1] queries | 3.646 / 3.663* | 4.660 / 4.666* | 0.802 / 0.783 | 0.697 / 0.694 | 0.461 / 0.459 |
+| r16_oai_nocrop_hist (2 seeds) | OpenAI | 8×8 + h[t−1] queries | 3.644 / 3.699* | 4.667 / 4.633* | 0.794 / 0.802 | 0.687 / 0.699 | 0.461 / 0.465 |
+
+\* Losses under OpenAI labels are not comparable to Qwen-label losses: it's a different target space, and OpenAI keys
+are more spread out (median cosine 0.16 vs 0.35). Compare label sets on the judged columns.
+
+Findings:
+- **History-conditioned attention helps a little, and the gain replicates.** Readout queries from h[t−1] plus static
+  whole-screen queries improve val by about 0.03–0.04 and test by 0.03–0.05 on both feature sets and both seeds.
+  Pooling runs inside the recurrence (keys/values precomputed in parallel), and training is about 2× slower
+  (19 vs 36 steps/s).
+- **Dense tokens beat fixed averaging of the same features** (4.241 vs 4.276 val; 5.35 vs 5.46 test). The
+  1152→512 channel PCA keeps 91.5% of the variance.
+- **Learned compression (Perceiver) doesn't help.** All four variants are worse than attending the dense tokens
+  directly. Likely reason: latents compressed before the action- and history-conditioned readout can no longer
+  isolate the region those queries need.
+- **Removing click crops costs about 0.16 val.** History queries and dense tokens recover about a third of it.
+- **OpenAI text-embedding-3-large labels:** judged test R@5 is +2.3 points over Qwen labels (0.795 vs 0.772,
+  4 runs each), and MRR/R@1/nDCG are slightly better. OS is a bit more decodable from the embedding (probe −0.10 vs
+  −0.15). As a target space alone (instruction-similarity oracle on judged test pairs), OpenAI gives R@1 0.707 vs
+  0.671 and MRR 0.790 vs 0.759, but nDCG@10 0.686 vs 0.707. THETA_FN = 0.8 in the OpenAI space. Cost $0.87.
+
+Infrastructure:
+- **Quota incident.** Model downloads filled the ~2 TiB home quota on 2026-11-04. HF_HOME and the 8×8 frame cache
+  now live on `/nas/ttl=60d` (with a symlink at the old path).
+- **flash-attn.** A prebuilt 2.7.4 wheel matching torch 2.5.1/cu121 makes the Qwen2.5-VL vision cache about 5× faster
+  (`scripts/install_flash_attn.sh`; install without dependencies).
+- **Next (round 17):** a Qwen2.5-VL-7B vision-tower dense cache (native resolution, about 1288×728) compared with
+  SigLIP2 under OpenAI labels.
+
 ## Best configuration
 
 ```

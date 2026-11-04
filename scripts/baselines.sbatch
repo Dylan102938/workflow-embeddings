@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=wfemb-baselines
 #SBATCH --partition=main
-#SBATCH --gres=gpu:A6000:1
+#SBATCH --gres=gpu:1
+#SBATCH --exclude=ddpg.ist.berkeley.edu,dqn.ist.berkeley.edu,gail.ist.berkeley.edu,gan.ist.berkeley.edu,ppo.ist.berkeley.edu,vae.ist.berkeley.edu   # A100 nodes only (airl/sac: SXM4-80GB, cirl/rlhf: PCI-80GB)
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=06:00:00

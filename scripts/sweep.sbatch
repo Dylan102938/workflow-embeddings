@@ -1,12 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=wfemb-sweep
 #SBATCH --partition=main
-#SBATCH --gres=gpu:A6000:4
+#SBATCH --gres=gpu:4
+#SBATCH --exclude=ddpg.ist.berkeley.edu,dqn.ist.berkeley.edu,gail.ist.berkeley.edu,gan.ist.berkeley.edu,ppo.ist.berkeley.edu,vae.ist.berkeley.edu   # A100 nodes only (airl/sac: SXM4-80GB, cirl/rlhf: PCI-80GB)
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=160G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
-# Usage: sbatch [--gres=gpu:A6000:N] scripts/sweep.sbatch sweeps/<file>.txt
+# Usage: sbatch [--gres=gpu:N] scripts/sweep.sbatch sweeps/<file>.txt
 # Each non-comment line of the file is one run's train args; run i goes to GPU i (one run per GPU).
 set -euo pipefail
 source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh

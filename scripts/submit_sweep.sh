@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit each line of a sweep file as its own single-GPU job (easier to schedule than one multi-GPU job).
+# Submit each line of a sweep file as its own single-GPU job (easier to schedule than one multi-GPU job; scripts request A100s).
 # Usage: scripts/submit_sweep.sh sweeps/r1.txt [extra sbatch args, e.g. --dependency=afterok:JOBID]
 set -euo pipefail
 SWEEP=$1; shift

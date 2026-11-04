@@ -114,11 +114,15 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="debug: only the first N frames of the shard")
-    ap.add_argument("--mode", choices=["full", "effect"], default="full",
-                    help="effect: only a crop of each frame around the PREVIOUS step's action point (what it did)")
+    ap.add_argument("--mode", choices=["full", "crop", "effect"], default="full",
+                    help="full: global grid + action crop (main cache). crop / effect: an extra crop-only cache "
+                         "around the current / PREVIOUS step's action point, written to BULK/frames_<name>/")
+    ap.add_argument("--name", default="", help="extra-cache name (default: the mode)")
     args = ap.parse_args()
+    extra = args.mode != "full"
     effect = args.mode == "effect"
-    out_dir = paths.FRAMES_EFFECT if effect else paths.FRAMES
+    name = args.name or args.mode
+    out_dir = paths.BULK / f"frames_{name}" if extra else paths.FRAMES
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with open(paths.PREP / "sessions.pkl", "rb") as f:
@@ -148,30 +152,30 @@ def main():
     dim = vision.config.hidden_size
 
     g_path = out_dir / f"global_{tag}.npy"
-    c_path = out_dir / (f"effect_{tag}.npy" if effect else f"crop_{tag}.npy")
+    c_path = out_dir / (f"{name}_{tag}.npy" if extra else f"crop_{tag}.npy")
     prog_path = out_dir / f"progress_{tag}.json"
     G, C = args.grid ** 2, args.crop_grid ** 2
     start = lo
     if prog_path.exists() and c_path.exists():
         start = json.load(open(prog_path))["next"]
-        g_mm = None if effect else np.load(g_path, mmap_mode="r+")
+        g_mm = None if extra else np.load(g_path, mmap_mode="r+")
         c_mm = np.load(c_path, mmap_mode="r+")
         sizes = np.load(out_dir / f"sizes_{tag}.npy", mmap_mode="r+")
         print(f"resuming at {start}", flush=True)
     else:
-        g_mm = None if effect else np.lib.format.open_memmap(g_path, mode="w+", dtype=np.uint16,
-                                                              shape=(hi - lo, G, dim))
+        g_mm = None if extra else np.lib.format.open_memmap(g_path, mode="w+", dtype=np.uint16,
+                                                             shape=(hi - lo, G, dim))
         c_mm = np.lib.format.open_memmap(c_path, mode="w+", dtype=np.uint16, shape=(hi - lo, C, dim))
         sizes = np.lib.format.open_memmap(out_dir / f"sizes_{tag}.npy", mode="w+", dtype=np.int32,
                                           shape=(hi - lo, 3))
     ds = FrameDataset(items[start:hi], args.encoder, args.global_patches, args.crop_patches,
-                      args.crop_frac, args.crop_px, do_global=not effect)
+                      args.crop_frac, args.crop_px, do_global=not extra)
     dl = torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers, collate_fn=collate,
                                      prefetch_factor=4, persistent_workers=False, pin_memory=True)
     t0, done, missing = time.time(), 0, 0
     with torch.inference_mode():
         for bi, (gi, ok, W, H, gpv, gmask, gshape, cpv, cmask, cshape) in enumerate(dl):
-            if not effect:
+            if not extra:
                 gh = vision(pixel_values=gpv.cuda(non_blocking=True).to(torch.bfloat16),
                             attention_mask=gmask.cuda(non_blocking=True),
                             spatial_shapes=gshape.cuda(non_blocking=True)).last_hidden_state
@@ -180,7 +184,7 @@ def main():
                         spatial_shapes=cshape.cuda(non_blocking=True)).last_hidden_state
             cp = pool_grid(ch, cshape, (args.crop_grid, args.crop_grid))
             rows = (gi - lo).numpy()
-            if not effect:
+            if not extra:
                 g_mm[rows] = to_bf16_bits(pool_grid(gh, gshape, (args.grid, args.grid)))
             c_mm[rows] = to_bf16_bits(cp)
             sizes[rows] = np.stack([W.numpy(), H.numpy(), ok.numpy().astype(np.int32)], 1)
@@ -200,7 +204,8 @@ def main():
         g_mm.flush()
     meta = {"shard": args.shard, "num_shards": args.num_shards, "lo": lo, "hi": hi, "dim": dim,
             "global_tokens": G, "crop_tokens": C, "encoder": args.encoder, "global_patches": args.global_patches,
-            "crop_patches": args.crop_patches, "crop_frac": args.crop_frac, "missing": missing, "mode": args.mode,
+            "crop_patches": args.crop_patches, "crop_frac": args.crop_frac, "crop_px": args.crop_px,
+            "missing": missing, "mode": args.mode, "name": name,
             "complete": not args.limit}
     with open(out_dir / f"meta_{tag}.json", "w") as f:
         json.dump(meta, f)

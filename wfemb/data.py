@@ -43,7 +43,7 @@ class FrameStore:
     [global grid | action crop (optional) | effect crop of the previous action (optional)]."""
     on_gpu = False
 
-    def __init__(self, frames_dir: Path, use_crop: bool, effect_dir: Path | None = None):
+    def __init__(self, frames_dir: Path, use_crop: bool, extras: list[str] | tuple = ()):
         metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
         if not metas:
             raise FileNotFoundError(f"no frame cache in {frames_dir}")
@@ -55,11 +55,13 @@ class FrameStore:
             parts = [np.load(frames_dir / f"global_{tag}.npy", mmap_mode="r")]
             if use_crop:
                 parts.append(np.load(frames_dir / f"crop_{tag}.npy", mmap_mode="r"))
-            if effect_dir is not None:
-                me = json.load(open(effect_dir / f"meta_{tag}.json"))
-                assert (me["lo"], me["hi"]) == (m["lo"], m["hi"]), f"effect shard {tag} does not match"
-                parts.append(np.load(effect_dir / f"effect_{tag}.npy", mmap_mode="r"))
-                n_eff = me["crop_tokens"]
+            n_eff = 0
+            for name in extras:                       # extra crop caches on the bulk share (BULK/frames_<name>)
+                d = paths.BULK / f"frames_{name}"
+                me = json.load(open(d / f"meta_{tag}.json"))
+                assert (me["lo"], me["hi"]) == (m["lo"], m["hi"]), f"{name} shard {tag} does not match"
+                parts.append(np.load(d / f"{name}_{tag}.npy", mmap_mode="r"))
+                n_eff += me["crop_tokens"]
             self.shards.append((m["lo"], m["hi"], parts))
         self.shards.sort(key=lambda s: s[0])
         self.use_crop = use_crop
@@ -89,9 +91,9 @@ class GPUFrameStore(FrameStore):
     on_gpu = True
     FP8_MAX = 448.0
 
-    def __init__(self, frames_dir: Path, use_crop: bool, device, effect_dir: Path | None = None,
+    def __init__(self, frames_dir: Path, use_crop: bool, device, extras: list[str] | tuple = (),
                  chunk: int = 8192):
-        super().__init__(frames_dir, use_crop, effect_dir)
+        super().__init__(frames_dir, use_crop, extras)
         self.device = device
         self.t = torch.empty((self.total, self.n_tok, self.dim), dtype=torch.uint8, device=device)
         for lo, hi, parts in self.shards:
@@ -115,7 +117,7 @@ class GPUFrameStore(FrameStore):
 
 class SessionData:
     def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "memmap",
-                 device=None, effect_dir: Path | None = None):
+                 device=None, extras: list[str] | tuple = ()):
         with open(paths.PREP / "sessions.pkl", "rb") as f:
             self.sessions = pickle.load(f)
         ev = np.load(paths.PREP / "events.npz")
@@ -140,9 +142,9 @@ class SessionData:
         groups = {g: i for i, g in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.group = np.array([groups[s["group"]] for s in self.sessions])
         if frames_mode == "gpu_fp8":
-            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, effect_dir)
+            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, extras)
         else:
-            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, effect_dir)
+            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, extras)
         assert self.frames.total == int(self.offset[-1] + self.length[-1]), "frame cache / events mismatch"
 
     def indices(self, split: str) -> np.ndarray:

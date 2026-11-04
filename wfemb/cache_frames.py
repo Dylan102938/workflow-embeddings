@@ -28,9 +28,10 @@ Image.MAX_IMAGE_PIXELS = None
 
 
 class FrameDataset(torch.utils.data.Dataset):
-    def __init__(self, items, encoder, global_patches, crop_patches, crop_frac, crop_px, do_global=True):
+    def __init__(self, items, encoder, global_patches, crop_patches, crop_frac, crop_px, do_global=True,
+                 do_crop=True):
         self.items = items
-        self.do_global = do_global
+        self.do_global, self.do_crop = do_global, do_crop
         self.encoder = encoder
         self.gp, self.cp = global_patches, crop_patches
         self.crop_frac, self.crop_px = crop_frac, crop_px
@@ -67,17 +68,21 @@ class FrameDataset(torch.utils.data.Dataset):
         if not ok:
             img = Image.new("RGB", (1280, 720))
         W, H = img.size
-        side = min(max(int(round(self.crop_frac * W)), 224), W, H)
-        left = int(round(min(max(fx * W - side / 2, 0), W - side)))
-        top = int(round(min(max(fy * H - side / 2, 0), H - side)))
-        crop = img.crop((left, top, left + side, top + side)).resize((self.crop_px, self.crop_px), Image.BICUBIC)
-        c = self.proc(images=[crop], max_num_patches=self.cp, return_tensors="pt")
+        if self.do_crop:
+            side = min(max(int(round(self.crop_frac * W)), 224), W, H)
+            left = int(round(min(max(fx * W - side / 2, 0), W - side)))
+            top = int(round(min(max(fy * H - side / 2, 0), H - side)))
+            crop = img.crop((left, top, left + side, top + side)).resize((self.crop_px, self.crop_px), Image.BICUBIC)
+            c = self.proc(images=[crop], max_num_patches=self.cp, return_tensors="pt")
+            cv, cm, cs = c["pixel_values"][0], c["pixel_attention_mask"][0], c["spatial_shapes"][0]
+        else:
+            cv, cm, cs = torch.zeros(1), torch.zeros(1), torch.zeros(2, dtype=torch.long)
         if self.do_global:
             g = self.proc(images=[img], max_num_patches=self.gp, return_tensors="pt")
             gv, gm, gs = g["pixel_values"][0], g["pixel_attention_mask"][0], g["spatial_shapes"][0]
         else:
             gv, gm, gs = torch.zeros(1), torch.zeros(1), torch.zeros(2, dtype=torch.long)
-        return (gi, ok, W, H, gv, gm, gs, c["pixel_values"][0], c["pixel_attention_mask"][0], c["spatial_shapes"][0])
+        return (gi, ok, W, H, gv, gm, gs, cv, cm, cs)
 
 
 def collate(batch):
@@ -114,11 +119,17 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="debug: only the first N frames of the shard")
-    ap.add_argument("--mode", choices=["full", "crop", "effect"], default="full",
+    ap.add_argument("--mode", choices=["full", "crop", "effect", "pca_fit", "dense"], default="full",
                     help="full: global grid + action crop (main cache). crop / effect: an extra crop-only cache "
-                         "around the current / PREVIOUS step's action point, written to BULK/frames_<name>/")
+                         "around the current / PREVIOUS step's action point, written to BULK/frames_<name>/. "
+                         "pca_fit: fit a channel PCA on dense global tokens of train frames. dense: dense global "
+                         "grid (--grid, e.g. 16) projected with that PCA, written to BULK/frames_dense/")
     ap.add_argument("--name", default="", help="extra-cache name (default: the mode)")
+    ap.add_argument("--pca_dim", type=int, default=512)
+    ap.add_argument("--pca_frames", type=int, default=16000)
     args = ap.parse_args()
+    if args.mode in ("pca_fit", "dense"):
+        return dense_main(args)
     extra = args.mode != "full"
     effect = args.mode == "effect"
     name = args.name or args.mode
@@ -204,9 +215,107 @@ def main():
         g_mm.flush()
     meta = {"shard": args.shard, "num_shards": args.num_shards, "lo": lo, "hi": hi, "dim": dim,
             "global_tokens": G, "crop_tokens": C, "encoder": args.encoder, "global_patches": args.global_patches,
-            "crop_patches": args.crop_patches, "crop_frac": args.crop_frac, "crop_px": args.crop_px,
+            "crop_patches": args.crop_patches, "crop_frac": args.crop_frac, "crop_px": args.crop_px, "grid": args.grid,
             "missing": missing, "mode": args.mode, "name": name,
             "complete": not args.limit}
+    with open(out_dir / f"meta_{tag}.json", "w") as f:
+        json.dump(meta, f)
+    print("done", meta, flush=True)
+
+
+def dense_main(args):
+    """pca_fit: mean + top principal directions of dense global tokens over a sample of TRAIN frames.
+    dense:   every frame's global tokens on a --grid x --grid grid, centered and projected to --pca_dim."""
+    out_dir = paths.BULK / "frames_dense"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pca_path = paths.BULK / f"dense_pca_g{args.grid}_d{args.pca_dim}.npz"
+    with open(paths.PREP / "sessions.pkl", "rb") as f:
+        sessions = pickle.load(f)
+    items, g = [], 0
+    for s in sessions:
+        for img in s["images"]:
+            items.append((g, s["source"], img, 0.5, 0.5, s["split"]))
+            g += 1
+    from transformers import Siglip2VisionModel
+    vision = Siglip2VisionModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16,
+                                                attn_implementation="sdpa").vision_model.cuda().eval()
+    dim = vision.config.hidden_size
+    grid = (args.grid, args.grid)
+
+    def loader(sel):
+        ds = FrameDataset([it[:5] for it in sel], args.encoder, args.global_patches, args.crop_patches,
+                          args.crop_frac, args.crop_px, do_global=True, do_crop=False)
+        return torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers, collate_fn=collate,
+                                           prefetch_factor=4, pin_memory=True)
+
+    def encode(gpv, gmask, gshape):
+        h = vision(pixel_values=gpv.cuda(non_blocking=True).to(torch.bfloat16),
+                   attention_mask=gmask.cuda(non_blocking=True),
+                   spatial_shapes=gshape.cuda(non_blocking=True)).last_hidden_state
+        return pool_grid(h, gshape, grid)                                  # [B, grid^2, dim] fp32
+
+    if args.mode == "pca_fit":
+        train = [it for it in items if it[5] == "train"]
+        rng = np.random.default_rng(0)
+        sel = [train[i] for i in sorted(rng.choice(len(train), min(args.pca_frames, len(train)), replace=False))]
+        S = torch.zeros(dim, dtype=torch.float64, device="cuda")
+        C = torch.zeros(dim, dim, dtype=torch.float64, device="cuda")
+        n, t0 = 0, time.time()
+        with torch.inference_mode():
+            for bi, (gi, ok, W, H, gpv, gmask, gshape, *_rest) in enumerate(loader(sel)):
+                x = encode(gpv, gmask, gshape)[ok.cuda()].reshape(-1, dim).double()
+                S += x.sum(0)
+                C += x.T @ x
+                n += x.shape[0]
+                if bi % 100 == 0:
+                    print(f"pca_fit {bi * args.batch}/{len(sel)} frames  {time.time() - t0:.0f}s", flush=True)
+        mean = S / n
+        cov = C / n - torch.outer(mean, mean)
+        evals, evecs = torch.linalg.eigh(cov)
+        evals, evecs = evals.flip(0).clamp(min=0), evecs.flip(1)
+        cum = (evals.cumsum(0) / evals.sum()).cpu().numpy()
+        np.savez(pca_path, mean=mean.float().cpu().numpy(), comps=evecs[:, :args.pca_dim].float().cpu().numpy(),
+                 cum_var=cum, n_tokens=n)
+        print(f"saved {pca_path}: {n} tokens; variance kept at "
+              + ", ".join(f"{k}: {cum[k - 1]:.4f}" for k in (64, 128, 256, 384, 512, 768)), flush=True)
+        return
+
+    pca = np.load(pca_path)
+    mean = torch.from_numpy(pca["mean"]).cuda()
+    comps = torch.from_numpy(pca["comps"]).cuda()                       # [dim, pca_dim]
+    n = len(items)
+    bounds = np.linspace(0, n, args.num_shards + 1).astype(int)
+    lo, hi = int(bounds[args.shard]), int(bounds[args.shard + 1])
+    tag = f"{args.shard:02d}of{args.num_shards:02d}"
+    g_path, prog_path = out_dir / f"global_{tag}.npy", out_dir / f"progress_{tag}.json"
+    G = args.grid ** 2
+    start = lo
+    if prog_path.exists() and g_path.exists():
+        start = json.load(open(prog_path))["next"]
+        g_mm = np.load(g_path, mmap_mode="r+")
+        print(f"resuming at {start}", flush=True)
+    else:
+        g_mm = np.lib.format.open_memmap(g_path, mode="w+", dtype=np.uint16, shape=(hi - lo, G, args.pca_dim))
+    print(f"dense shard {tag}: frames [{lo}, {hi}) of {n}", flush=True)
+    t0, done, missing = time.time(), 0, 0
+    with torch.inference_mode():
+        for bi, (gi, ok, W, H, gpv, gmask, gshape, *_rest) in enumerate(loader(items[start:hi])):
+            x = (encode(gpv, gmask, gshape) - mean) @ comps
+            rows = (gi - lo).numpy()
+            g_mm[rows] = to_bf16_bits(x)
+            done += len(rows)
+            missing += int((~ok).sum())
+            if bi % 200 == 0:
+                g_mm.flush()
+                with open(prog_path, "w") as f:
+                    json.dump({"next": int(rows.max()) + lo + 1}, f)
+                rate = done / (time.time() - t0)
+                print(f"{done}/{hi - start} frames  {rate:.1f}/s  eta {(hi - start - done) / max(rate, 1e-6) / 60:.1f} min",
+                      flush=True)
+    g_mm.flush()
+    meta = {"shard": args.shard, "num_shards": args.num_shards, "lo": lo, "hi": hi, "dim": args.pca_dim,
+            "global_tokens": G, "crop_tokens": 0, "grid": args.grid, "encoder": args.encoder,
+            "global_patches": args.global_patches, "pca": str(pca_path), "missing": missing, "mode": "dense"}
     with open(out_dir / f"meta_{tag}.json", "w") as f:
         json.dump(meta, f)
     print("done", meta, flush=True)

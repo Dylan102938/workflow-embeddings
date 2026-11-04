@@ -1,0 +1,9 @@
+# Round 3: base = r2 winner (crop, paraphrased negatives, dropout 0.2, token-drop 0.25, wd 0.1).
+# Still overfits after ~15 epochs (kappa at step 0 ~56): step dropout, stronger reg, shorter schedule, kappa cap.
+--run r3_reg_seed1 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --seed 1
+--run r3_sd30 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --step_drop 0.3
+--run r3_sd50 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --step_drop 0.5
+--run r3_strong --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.2
+--run r3_ep15 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --epochs 15
+--run r3_kmax50 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --k_max 50
+--run r3_small_sd30 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.3

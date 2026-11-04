@@ -85,6 +85,48 @@ class FrameDataset(torch.utils.data.Dataset):
         return (gi, ok, W, H, gv, gm, gs, cv, cm, cs)
 
 
+class QwenFrameDataset(torch.utils.data.Dataset):
+    """Whole screenshots for the Qwen2.5-VL vision tower: native aspect ratio, resized to <= max_pixels."""
+
+    def __init__(self, items, model_name, max_pixels):
+        self.items, self.model_name, self.max_pixels = items, model_name, max_pixels
+        self.zips = None
+
+    def _open(self):
+        from transformers import Qwen2VLImageProcessor
+        self.proc = Qwen2VLImageProcessor.from_pretrained(self.model_name, min_pixels=56 * 56,
+                                                          max_pixels=self.max_pixels)
+        self.zips, self.index = {}, {}
+        for src, zp in paths.ZIPS.items():
+            self.zips[src] = SplitZip(zp)
+            self.index[src] = self.zips[src].basename_index()
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        if self.zips is None:
+            self._open()
+        gi, src, name = self.items[i][:3]
+        img = None
+        try:
+            member = self.index[src].get(name)
+            if member is not None:
+                img = Image.open(io.BytesIO(self.zips[src].read(member))).convert("RGB")
+        except Exception:
+            img = None
+        ok = img is not None
+        if not ok:
+            img = Image.new("RGB", (1280, 720))
+        out = self.proc(images=[img], return_tensors="pt")
+        return gi, ok, out["pixel_values"], out["image_grid_thw"][0]
+
+
+def collate_list(batch):
+    gi, ok, pv, thw = zip(*batch)
+    return torch.tensor(gi), torch.tensor(ok), list(pv), list(thw)
+
+
 def collate(batch):
     cols = list(zip(*batch))
     out = [torch.tensor(cols[0]), torch.tensor(cols[1]), torch.tensor(cols[2]), torch.tensor(cols[3])]
@@ -126,6 +168,10 @@ def main():
                          "grid (--grid, e.g. 16) projected with that PCA, written to BULK/frames_dense/")
     ap.add_argument("--name", default="", help="extra-cache name (default: the mode)")
     ap.add_argument("--pca_dim", type=int, default=512)
+    ap.add_argument("--encoder_type", choices=["siglip2", "qwen25vl"], default="siglip2",
+                    help="dense modes only. qwen25vl: Qwen2.5-VL vision tower (GUI/OCR-trained, native resolution)")
+    ap.add_argument("--qwen_model", default="Qwen/Qwen2.5-VL-7B-Instruct")
+    ap.add_argument("--max_pixels", type=int, default=1280 * 28 * 28, help="qwen25vl resize budget (~1M px)")
     ap.add_argument("--pca_frames", type=int, default=16000)
     args = ap.parse_args()
     if args.mode in ("pca_fit", "dense"):
@@ -226,9 +272,11 @@ def main():
 def dense_main(args):
     """pca_fit: mean + top principal directions of dense global tokens over a sample of TRAIN frames.
     dense:   every frame's global tokens on a --grid x --grid grid, centered and projected to --pca_dim."""
-    out_dir = paths.BULK / "frames_dense"
+    qwen = args.encoder_type == "qwen25vl"
+    suffix = "_qwen25vl" if qwen else ""
+    out_dir = paths.BULK / f"frames_dense{suffix}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    pca_path = paths.BULK / f"dense_pca_g{args.grid}_d{args.pca_dim}.npz"
+    pca_path = paths.BULK / f"dense_pca{suffix}_g{args.grid}_d{args.pca_dim}.npz"
     with open(paths.PREP / "sessions.pkl", "rb") as f:
         sessions = pickle.load(f)
     items, g = [], 0
@@ -236,23 +284,48 @@ def dense_main(args):
         for img in s["images"]:
             items.append((g, s["source"], img, 0.5, 0.5, s["split"]))
             g += 1
-    from transformers import Siglip2VisionModel
-    vision = Siglip2VisionModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16,
-                                                attn_implementation="sdpa").vision_model.cuda().eval()
-    dim = vision.config.hidden_size
     grid = (args.grid, args.grid)
+    if qwen:
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        full = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.qwen_model, torch_dtype=torch.bfloat16,
+                                                                  attn_implementation="sdpa", low_cpu_mem_usage=True)
+        vision = (full.visual if hasattr(full, "visual") else full.model.visual).cuda().eval()
+        del full
+        dim = vision.merger.mlp[-1].out_features
+        merge = vision.spatial_merge_size
 
-    def loader(sel):
-        ds = FrameDataset([it[:5] for it in sel], args.encoder, args.global_patches, args.crop_patches,
-                          args.crop_frac, args.crop_px, do_global=True, do_crop=False)
-        return torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers, collate_fn=collate,
-                                           prefetch_factor=4, pin_memory=True)
+        def loader(sel):
+            ds = QwenFrameDataset([it[:3] for it in sel], args.qwen_model, args.max_pixels)
+            return torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
+                                               collate_fn=collate_list, prefetch_factor=4)
 
-    def encode(gpv, gmask, gshape):
-        h = vision(pixel_values=gpv.cuda(non_blocking=True).to(torch.bfloat16),
-                   attention_mask=gmask.cuda(non_blocking=True),
-                   spatial_shapes=gshape.cuda(non_blocking=True)).last_hidden_state
-        return pool_grid(h, gshape, grid)                                  # [B, grid^2, dim] fp32
+        def encode_batch(batch):
+            gi, ok, pvs, thws = batch
+            outs = []
+            for pv, thw in zip(pvs, thws):        # one screenshot per forward: the sdpa path builds a dense mask
+                h = vision(pv.cuda(non_blocking=True).to(torch.bfloat16), grid_thw=thw[None].cuda())
+                gh, gw = int(thw[1]) // merge, int(thw[2]) // merge
+                x = h.view(gh, gw, -1).permute(2, 0, 1)[None].float()
+                outs.append(F.adaptive_avg_pool2d(x, grid)[0].flatten(1).T)
+            return gi, ok, torch.stack(outs)                               # [B, grid^2, dim] fp32
+    else:
+        from transformers import Siglip2VisionModel
+        vision = Siglip2VisionModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16,
+                                                    attn_implementation="sdpa").vision_model.cuda().eval()
+        dim = vision.config.hidden_size
+
+        def loader(sel):
+            ds = FrameDataset([it[:5] for it in sel], args.encoder, args.global_patches, args.crop_patches,
+                              args.crop_frac, args.crop_px, do_global=True, do_crop=False)
+            return torch.utils.data.DataLoader(ds, batch_size=args.batch, num_workers=args.workers,
+                                               collate_fn=collate, prefetch_factor=4, pin_memory=True)
+
+        def encode_batch(batch):
+            gi, ok, W, H, gpv, gmask, gshape = batch[:7]
+            h = vision(pixel_values=gpv.cuda(non_blocking=True).to(torch.bfloat16),
+                       attention_mask=gmask.cuda(non_blocking=True),
+                       spatial_shapes=gshape.cuda(non_blocking=True)).last_hidden_state
+            return gi, ok, pool_grid(h, gshape, grid)                      # [B, grid^2, dim] fp32
 
     if args.mode == "pca_fit":
         train = [it for it in items if it[5] == "train"]
@@ -262,8 +335,9 @@ def dense_main(args):
         C = torch.zeros(dim, dim, dtype=torch.float64, device="cuda")
         n, t0 = 0, time.time()
         with torch.inference_mode():
-            for bi, (gi, ok, W, H, gpv, gmask, gshape, *_rest) in enumerate(loader(sel)):
-                x = encode(gpv, gmask, gshape)[ok.cuda()].reshape(-1, dim).double()
+            for bi, batch in enumerate(loader(sel)):
+                gi, ok, x = encode_batch(batch)
+                x = x[ok.cuda()].reshape(-1, dim).double()
                 S += x.sum(0)
                 C += x.T @ x
                 n += x.shape[0]
@@ -299,8 +373,9 @@ def dense_main(args):
     print(f"dense shard {tag}: frames [{lo}, {hi}) of {n}", flush=True)
     t0, done, missing = time.time(), 0, 0
     with torch.inference_mode():
-        for bi, (gi, ok, W, H, gpv, gmask, gshape, *_rest) in enumerate(loader(items[start:hi])):
-            x = (encode(gpv, gmask, gshape) - mean) @ comps
+        for bi, batch in enumerate(loader(items[start:hi])):
+            gi, ok, x = encode_batch(batch)
+            x = (x - mean) @ comps
             rows = (gi - lo).numpy()
             g_mm[rows] = to_bf16_bits(x)
             done += len(rows)
@@ -314,7 +389,8 @@ def dense_main(args):
                       flush=True)
     g_mm.flush()
     meta = {"shard": args.shard, "num_shards": args.num_shards, "lo": lo, "hi": hi, "dim": args.pca_dim,
-            "global_tokens": G, "crop_tokens": 0, "grid": args.grid, "encoder": args.encoder,
+            "global_tokens": G, "crop_tokens": 0, "grid": args.grid,
+            "encoder": args.qwen_model if qwen else args.encoder, "max_pixels": args.max_pixels if qwen else None,
             "global_patches": args.global_patches, "pca": str(pca_path), "missing": missing, "mode": "dense"}
     with open(out_dir / f"meta_{tag}.json", "w") as f:
         json.dump(meta, f)

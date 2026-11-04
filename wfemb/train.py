@@ -25,6 +25,7 @@ def get_args(argv=None):
     ap.add_argument("--run", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--frames_dir", default=os.environ.get("WFEMB_FRAMES_DIR", str(paths.FRAMES)))
+    ap.add_argument("--keys_dir", default="", help="text-embedder key set (default: paths.KEYS)")
     ap.add_argument("--frames_mode", default="gpu_fp8", choices=["gpu_fp8", "memmap"],
                     help="gpu_fp8: frame cache resident on GPU as fp8; memmap: exact bf16 read from disk")
     # model
@@ -107,6 +108,8 @@ def main(argv=None):
         print(json.dumps(rec), flush=True)
 
     t0 = time.time()
+    if args.keys_dir:
+        paths.KEYS = Path(args.keys_dir)
     extras = [x for x in args.extra.split(",") if x] + (["effect"] if args.use_effect else [])
     data = SessionData(Path(args.frames_dir), use_crop=args.use_crop, frames_mode=args.frames_mode, device=device,
                        extras=extras, avg_grid=args.avg_grid)

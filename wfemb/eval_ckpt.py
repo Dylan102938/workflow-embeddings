@@ -30,8 +30,9 @@ def main():
     for run in args.runs:
         state = torch.load(paths.RUNS / run / args.ckpt, map_location=device, weights_only=False)
         a = state["args"]
+        paths.KEYS = Path(a["keys_dir"]) if a.get("keys_dir") else paths.SHARED
         extras = [x for x in a.get("extra", "").split(",") if x] + (["effect"] if a.get("use_effect") else [])
-        key = (bool(a.get("use_crop")), tuple(extras), a.get("frames_dir"), a.get("avg_grid", 0))
+        key = (bool(a.get("use_crop")), tuple(extras), a.get("frames_dir"), a.get("avg_grid", 0), a.get("keys_dir"))
         if key != data_key:                      # reload frames only when the token layout changes
             data, data_key = None, None
             torch.cuda.empty_cache()

@@ -5,7 +5,9 @@ from pathlib import Path
 DATA = Path(os.environ.get("WFEMB_DATA", "/nas/ucb/dfeng/data/workflow-embeddings"))
 RAW = DATA / "agentnet_raw"
 PREP = DATA / "prepared"          # sessions, events, splits, vocab
-KEYS = DATA / "keys"              # frozen text embeddings (instructions, paraphrases, typed text)
+SHARED = DATA / "keys"            # embedder-independent: paraphrases.json, judged_<split>.jsonl
+# frozen text embeddings (instructions, paraphrases, typed text) of ONE text embedder; WFEMB_KEYS selects another
+KEYS = Path(os.environ.get("WFEMB_KEYS", SHARED))
 FRAMES = DATA / "frames"          # frozen vision-encoder cache
 RUNS = DATA / "runs"              # checkpoints + logs
 # Regenerable extra caches live on the 60-day-TTL bulk share (keeps the ~2 TiB home quota free)

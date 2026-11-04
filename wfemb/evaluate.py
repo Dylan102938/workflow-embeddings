@@ -82,7 +82,7 @@ def _retrieval(E: torch.Tensor, groups: np.ndarray, apps: np.ndarray, within_app
 def load_judged(split: str, sidx: np.ndarray, groups: np.ndarray):
     """Graded relevance between sessions of a split: trace-judged labels (0/1/2) from
     KEYS/judged_<split>.jsonl, plus duplicate-instruction groups (gain 2). Keys are positions in sidx."""
-    path = paths.KEYS / f"judged_{split}.jsonl"
+    path = paths.SHARED / f"judged_{split}.jsonl"
     if not path.exists():
         return None
     pos = {int(s): i for i, s in enumerate(sidx)}

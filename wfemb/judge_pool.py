@@ -148,10 +148,10 @@ def main():
 
     with open(paths.PREP / "sessions.pkl", "rb") as f:
         sessions = pickle.load(f)
-    keys = np.load(paths.KEYS / "keys.npy")
+    keys = np.load(paths.SHARED / "keys.npy")
     idx = [i for i, s in enumerate(sessions) if s["split"] == args.split]
-    out_path = paths.KEYS / f"judged_{args.split}.jsonl"
-    state_path = paths.KEYS / f"judged_{args.split}_batch.json"
+    out_path = paths.SHARED / f"judged_{args.split}.jsonl"
+    state_path = paths.SHARED / f"judged_{args.split}_batch.json"
 
     done = set()
     if out_path.exists():

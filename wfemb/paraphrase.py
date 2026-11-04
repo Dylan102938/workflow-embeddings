@@ -68,8 +68,8 @@ def main():
         paras = [p for p in parse_list(raw[ins], args.n) if p.lower() != ins.lower()]
         short += len(paras) < args.n
         result[ins] = paras
-    paths.KEYS.mkdir(parents=True, exist_ok=True)
-    out_path = paths.KEYS / "paraphrases.json"
+    paths.SHARED.mkdir(parents=True, exist_ok=True)
+    out_path = paths.SHARED / "paraphrases.json"
     with open(out_path, "w") as f:
         json.dump({"model": args.model, "n": args.n, "paraphrases": result, "raw": raw}, f)
     print(f"wrote {out_path}; {short} instructions got fewer than {args.n} paraphrases")

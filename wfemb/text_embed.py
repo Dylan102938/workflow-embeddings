@@ -55,6 +55,10 @@ def main():
     ap.add_argument("--placeholders", action="store_true",
                     help="embed instructions with incidental literals replaced by placeholders")
     ap.add_argument("--skip_texts", action="store_true")
+    ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--para_keep_frac", type=float, default=0.0,
+                    help="if set, choose theta_para as the similarity quantile that keeps this fraction "
+                         "(calibrates the drift filter to a new embedder's similarity scale)")
     args = ap.parse_args()
     paths.KEYS.mkdir(parents=True, exist_ok=True)
 
@@ -67,7 +71,7 @@ def main():
     model = load_embedder(args.model, max_len=256)
     instr = [prep(s["instruction"]) for s in sessions]
     uniq = sorted(set(instr))
-    uvec = encode(model, uniq)
+    uvec = encode(model, uniq, bs=args.batch)
     pos = {t: i for i, t in enumerate(uniq)}
     keys = uvec[[pos[t] for t in instr]]
     np.save(paths.KEYS / "keys.npy", keys)
@@ -75,7 +79,7 @@ def main():
 
     stats = {"model": args.model, "dim": int(keys.shape[1]), "placeholders": args.placeholders,
              "theta_para": args.theta_para}
-    para_path = paths.KEYS / "paraphrases.json"
+    para_path = paths.SHARED / "paraphrases.json"
     if para_path.exists():
         with open(para_path) as f:
             paras = json.load(f)["paraphrases"]
@@ -85,11 +89,14 @@ def main():
                 flat.append(prep(p))
                 owner.append(si)
         uflat = sorted(set(flat))
-        fvec = encode(model, uflat)
+        fvec = encode(model, uflat, bs=args.batch)
         fpos = {t: i for i, t in enumerate(uflat)}
         pvec = fvec[[fpos[t] for t in flat]]
         owner = np.asarray(owner)
         sims = (pvec * keys[owner]).sum(1)
+        if args.para_keep_frac:
+            args.theta_para = float(np.quantile(sims, 1 - args.para_keep_frac))
+            stats["theta_para"] = args.theta_para
         keep = sims > args.theta_para
         stats["para_total"] = int(len(sims))
         stats["para_kept"] = int(keep.sum())
@@ -109,7 +116,7 @@ def main():
     if not args.skip_texts:
         texts = vocab["texts"]
         model.max_seq_length = 128
-        tvec = encode(model, texts, bs=512) if texts else np.zeros((0, keys.shape[1]), np.float32)
+        tvec = encode(model, texts, bs=2 * args.batch) if texts else np.zeros((0, keys.shape[1]), np.float32)
         np.save(paths.KEYS / "text_vecs.npy", tvec.astype(np.float16))
         stats["n_texts"] = len(texts)
     with open(paths.KEYS / "meta.json", "w") as f:

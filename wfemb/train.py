@@ -47,7 +47,8 @@ def get_args(argv=None):
     # eval / logging
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--log_every", type=int, default=50)
-    ap.add_argument("--select_on", default="loss", choices=["loss", "key_R@5", "session_R@5_cross_app"])
+    ap.add_argument("--select_on", default="loss",
+                    help="val metric for best.pt: loss | key_R@5 | jsession_R@5_cross_app | jsession_nDCG@10_cross_app ...")
     ap.add_argument("--max_steps", type=int, default=0, help="debug: stop early")
     return ap.parse_args(argv)
 
@@ -118,7 +119,8 @@ def main(argv=None):
                    "slurm_job": os.environ.get("SLURM_JOB_ID")}, f, indent=1)
     print(f"{n_params / 1e6:.2f}M params, {total} steps ({steps_per_epoch}/epoch)", flush=True)
 
-    best = {"loss": float("inf"), "key_R@5": -1.0, "session_R@5_cross_app": -1.0}
+    best = {}
+    tracked = {"loss", "key_R@5", "jsession_R@5_cross_app", "jsession_nDCG@10_cross_app", args.select_on}
     step, epoch = 0, 0
     t_last, data_wait = time.time(), 0.0
     run_loss, run_n = 0.0, 0
@@ -161,10 +163,13 @@ def main(argv=None):
                 log(rec)
                 state = {"model": model.state_dict(), "cfg": dataclasses.asdict(cfg), "args": vars(args),
                          "step": step}
-                for key in best:
-                    if key in m and (m[key] < best[key] if key == "loss" else m[key] > best[key]):
+                sel = args.select_on if args.select_on in m else "loss"   # metric may be unavailable
+                for key in tracked:
+                    if key not in m or m[key] != m[key]:                 # missing or nan
+                        continue
+                    if key not in best or (m[key] < best[key] if key == "loss" else m[key] > best[key]):
                         best[key] = m[key]
-                        if key == args.select_on:
+                        if key == sel:
                             torch.save(state, run_dir / "best.pt")
                 torch.save(state, run_dir / "last.pt")
                 t_last = time.time()

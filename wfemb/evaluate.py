@@ -6,11 +6,13 @@ never share an instruction group with train, so each one's own key is a genuinel
 from __future__ import annotations
 
 import collections
+import json
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
+from . import paths
 from .data import SessionData, length_bucketed_batches
 from .loss import false_negative_mask, info_nce
 
@@ -60,6 +62,67 @@ def _retrieval(E: torch.Tensor, groups: np.ndarray, apps: np.ndarray, within_app
     tag = "within_app" if within_app else "cross_app"
     return {f"session_R@1_{tag}": float(np.mean(r1)), f"session_R@5_{tag}": float(np.mean(r5)),
             f"session_MRR_{tag}": float(np.mean(mrr)), "n_session_queries": len(q)}
+
+
+def load_judged(split: str, sidx: np.ndarray, groups: np.ndarray):
+    """Graded relevance between sessions of a split: trace-judged labels (0/1/2) from
+    KEYS/judged_<split>.jsonl, plus duplicate-instruction groups (gain 2). Keys are positions in sidx."""
+    path = paths.KEYS / f"judged_{split}.jsonl"
+    if not path.exists():
+        return None
+    pos = {int(s): i for i, s in enumerate(sidx)}
+    rel = collections.defaultdict(dict)
+    for line in open(path):
+        r = json.loads(line)
+        a, b = pos.get(r["a"]), pos.get(r["b"])
+        if a is None or b is None:
+            continue
+        g = int(r["label"])
+        rel[a][b] = max(rel[a].get(b, 0), g)
+        rel[b][a] = max(rel[b].get(a, 0), g)
+    members = collections.defaultdict(list)
+    for i, g in enumerate(groups.tolist()):
+        members[g].append(i)
+    for ms in members.values():
+        for a in ms:
+            for b in ms:
+                if a != b:
+                    rel[a][b] = 2
+    return rel
+
+
+def _judged_retrieval(E: torch.Tensor, rel, apps: np.ndarray, within_app: bool, k: int = 10):
+    """Pooled relevance (unjudged = 0). R@k / MRR over queries with a 'same workflow' (gain 2) partner;
+    nDCG@k with gains 2^g - 1 over queries with any positive gain."""
+    E = F.normalize(E.float(), dim=-1)
+    S = E @ E.T
+    S.fill_diagonal_(-float("inf"))
+    r1, r5, mrr, ndcg = [], [], [], []
+    disc = 1.0 / np.log2(np.arange(2, k + 2))
+    for q, cands in rel.items():
+        if not any(g > 0 for g in cands.values()):
+            continue
+        s = S[q].clone()
+        if within_app:
+            s[torch.from_numpy(apps != apps[q])] = -float("inf")
+            cands = {j: g for j, g in cands.items() if apps[j] == apps[q]}
+            if not any(g > 0 for g in cands.values()):
+                continue
+        order = s.argsort(descending=True).tolist()
+        gains = np.array([cands.get(j, 0) for j in order[:k]], float)
+        ideal = np.sort(np.array(list(cands.values()), float))[::-1][:k]
+        idcg = ((2 ** ideal - 1) * disc[:len(ideal)]).sum()
+        ndcg.append(((2 ** gains - 1) * disc[:len(gains)]).sum() / idcg)
+        if any(g == 2 for g in cands.values()):
+            rank = next(i for i, j in enumerate(order) if cands.get(j, 0) == 2) + 1
+            r1.append(rank <= 1); r5.append(rank <= 5); mrr.append(1.0 / rank)
+    tag = "within_app" if within_app else "cross_app"
+    out = {f"jsession_nDCG@{k}_{tag}": float(np.mean(ndcg)) if ndcg else float("nan"),
+           f"n_jsession_queries_{tag}": len(r1)}
+    if r1:
+        out.update({f"jsession_R@1_{tag}": float(np.mean(r1)), f"jsession_R@5_{tag}": float(np.mean(r5)),
+                    f"jsession_MRR_{tag}": float(np.mean(mrr))})
+    return out
 
 
 def _ece(conf: np.ndarray, correct: np.ndarray, bins: int = 15) -> float:
@@ -156,6 +219,10 @@ def evaluate(model, data: SessionData, split: str, device, theta_fn: float, U_tr
     apps = np.array([data.sessions[i]["app"] for i in sidx])
     out.update(_retrieval(E, groups, apps, within_app=False))
     out.update(_retrieval(E, groups, apps, within_app=True))
+    rel = load_judged(split, sidx, groups)
+    if rel is not None:
+        out.update(_judged_retrieval(E, rel, apps, within_app=False))
+        out.update(_judged_retrieval(E, rel, apps, within_app=True))
     if full:
         os_lab = np.array([data.sessions[i]["os"] for i in sidx])
         mean_frame = np.stack([mean_frame_feature(data, i) for i in sidx])

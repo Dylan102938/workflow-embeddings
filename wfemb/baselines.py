@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from . import paths
 from .actions import EVENT_TYPES
 from .data import SessionData
-from .evaluate import _retrieval
+from .evaluate import _judged_retrieval, _retrieval, load_judged
 from .loss import false_negative_mask
 
 
@@ -107,6 +107,10 @@ def main():
             r = {}
             r.update(_retrieval(E, groups, apps, within_app=False))
             r.update(_retrieval(E, groups, apps, within_app=True))
+            rel = load_judged(split, sp, groups)
+            if rel is not None:
+                r.update(_judged_retrieval(E, rel, apps, within_app=False))
+                r.update(_judged_retrieval(E, rel, apps, within_app=True))
             res[f"{split}/{name}"] = r
         # non-recurrent map into key space: ridge on [mean frame, last frame, action tf-idf svd]
         Xb = np.concatenate([mean_f, last_f, A_svd], 1)

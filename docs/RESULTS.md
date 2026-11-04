@@ -1,6 +1,6 @@
 # Session-embedding model (v1): training results
 
-Status as of 2026-11-04. All training ran on the CHAI `rnn` cluster through Slurm, on single A6000s.
+Status as of 2026-11-04. All training ran on the CHAI `rnn` cluster through Slurm: rounds 1–12 on single A6000s, rounds 13+ on single A100s. The concise, data-checked summary is `docs/SUMMARY.md`.
 Data lives on NAS under `/nas/ucb/dfeng/data/workflow-embeddings` (runs in `runs/`, logs in `logs/`).
 
 ## Headline
@@ -117,7 +117,8 @@ python -m wfemb.train --run NAME --use_crop --para_negatives --dropout 0.3 --tok
    near-verbatim duplicates at ≥ 0.95. 0.85 would have masked exactly the same-app negatives the design wants to
    keep.
 3. **Action-crop tokens from the start.** This is the first half of upgrade 2, built straight into the cache: a
-   high-res crop at the action point, 16 extra tokens per frame. It was the largest single win in round 1.
+   high-res crop at the action point, 16 extra tokens per frame. It was a large round-1 win (0.466 val), second only
+   to dropping the flawed paraphrase augmentation (0.620).
 4. **Regularization, a κ cap, label smoothing and EMA were added.** The dominant failure mode is memorizing
    training sessions from their first screenshot: κ at step 0 climbs over training while val loss rises. Remedies
    that worked:
@@ -176,6 +177,6 @@ python -m wfemb.summarize r8_                      # comparison table
 - **Richer visual input is the most likely next gain.** Rounds 8–12 are flat, and the evidence curve stops rising
   halfway through sessions. More or higher-resolution tokens don't fit an A6000 next to the on-GPU cache. Options:
   run on A100-80GB, or stream frames from host RAM / NAS, which is about 10× slower per run.
-- **Test-set judged pool:** about $80 at batch price. Only val is judged so far ($25.49).
+- **Test-set judged pool:** done (16,885 pairs, $86.41); val ($25.49).
 - **Push to GitHub.** Both SSH keys started failing mid-session. Commits are on branch `train-v1` in the NAS bare
   repo `rnn:/nas/ucb/dfeng/code/workflow-embeddings.git`.

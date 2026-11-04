@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# project
+.venv/
+runs/
+*.npy
+*.npz
+*.pt

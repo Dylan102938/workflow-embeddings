@@ -12,5 +12,7 @@
 set -euo pipefail
 source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
 echo "host $(hostname)  git $(git rev-parse --short HEAD)  args: $*"
+$UV sync --frozen --inexact >/dev/null 2>&1 || true
+[[ "$*" == *qwen25vl* ]] && scripts/install_flash_attn.sh
 $UV run python -c "import sys, torch, transformers, importlib.util as u; print(sys.version.split()[0], torch.__version__, transformers.__version__, torch.cuda.get_device_name(0), 'flash_attn' if u.find_spec('flash_attn') else 'no flash_attn')"
 $UV run python -m wfemb.cache_frames --shard "$SLURM_ARRAY_TASK_ID" --num_shards 8 --workers 11 "$@"

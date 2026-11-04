@@ -1,13 +1,14 @@
-"""Training-time data: memory-mapped frame cache + flat event arrays + frozen keys.
+"""Training-time data: frame cache + flat event arrays + frozen keys.
 
-Batches are padded B x T (length-bucketed). Everything is gathered on CPU with numpy fancy indexing
-and moved to GPU by a background prefetch thread.
+Batches are padded B x T (length-bucketed). Events are gathered on CPU and moved to GPU by a background
+prefetch thread. Frame tokens either come from the memory-mapped bf16 cache on NAS (frames_mode="memmap",
+exact) or from a copy held in GPU memory as fp8-e4m3 (frames_mode="gpu_fp8", ~30 GB for the global tokens),
+which needs no host RAM and no data loading during training.
 """
 from __future__ import annotations
 
 import glob
 import json
-import os
 import pickle
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,7 @@ class Batch:
     ev_text: torch.Tensor      # [B, T, E] long (-1 = none)
     valid: torch.Tensor        # [B, T] bool
     lengths: torch.Tensor      # [B]
+    gidx: torch.Tensor         # [B, T] global step index of each (padded) position
 
     def to(self, device):
         return Batch(**{k: v.to(device, non_blocking=True) for k, v in self.__dict__.items()})
@@ -38,6 +40,7 @@ class Batch:
 
 class FrameStore:
     """Concatenation of per-shard memmaps, addressed by global step index."""
+    on_gpu = False
 
     def __init__(self, frames_dir: Path, use_crop: bool):
         metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
@@ -76,8 +79,41 @@ class FrameStore:
         return out
 
 
+class GPUFrameStore(FrameStore):
+    """All frame tokens resident on the GPU as fp8-e4m3 (stored as uint8), dequantized to bf16 per batch."""
+    on_gpu = True
+    FP8_MAX = 448.0
+
+    def __init__(self, frames_dir: Path, use_crop: bool, device, chunk: int = 8192):
+        super().__init__(frames_dir, use_crop)
+        self.device = device
+        self.t = torch.empty((self.total, self.n_tok, self.dim), dtype=torch.uint8, device=device)
+        G = None
+        for lo, hi, g, c in self.shards:
+            G = g.shape[1]
+            for a in range(0, hi - lo, chunk):
+                b = min(hi - lo, a + chunk)
+                parts = [g[a:b]] + ([c[a:b]] if c is not None else [])
+                for j, arr in enumerate(parts):
+                    x = torch.from_numpy(np.ascontiguousarray(arr).view(np.int16)).to(device).view(torch.bfloat16)
+                    q = x.clamp(-self.FP8_MAX, self.FP8_MAX).to(torch.float8_e4m3fn).view(torch.uint8)
+                    if j == 0:
+                        self.t[lo + a:lo + b, :G] = q
+                    else:
+                        self.t[lo + a:lo + b, G:] = q
+        torch.cuda.synchronize(device)
+
+    def gather_torch(self, gidx: torch.Tensor) -> torch.Tensor:
+        return self.t[gidx].view(torch.float8_e4m3fn).to(torch.bfloat16)
+
+    def gather(self, gidx: np.ndarray) -> np.ndarray:
+        x = self.gather_torch(torch.from_numpy(np.asarray(gidx)).to(self.device))
+        return x.view(torch.int16).cpu().numpy().view(np.uint16)
+
+
 class SessionData:
-    def __init__(self, frames_dir: Path | None = None, use_crop: bool = False):
+    def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "memmap",
+                 device=None):
         with open(paths.PREP / "sessions.pkl", "rb") as f:
             self.sessions = pickle.load(f)
         ev = np.load(paths.PREP / "events.npz")
@@ -101,7 +137,10 @@ class SessionData:
         self.split = np.array([s["split"] for s in self.sessions])
         groups = {g: i for i, g in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.group = np.array([groups[s["group"]] for s in self.sessions])
-        self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop)
+        if frames_mode == "gpu_fp8":
+            self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device)
+        else:
+            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop)
         assert self.frames.total == int(self.offset[-1] + self.length[-1]), "frame cache / events mismatch"
 
     def indices(self, split: str) -> np.ndarray:
@@ -115,11 +154,15 @@ class SessionData:
         valid = np.arange(T)[None, :] < lens[:, None]
         gidx = (self.offset[sidx][:, None] + np.minimum(np.arange(T)[None, :], lens[:, None] - 1))
         flat = gidx.reshape(-1)
-        frames = self.frames.gather(flat).reshape(B, T, self.frames.n_tok, self.frames.dim)
+        if self.frames.on_gpu:
+            frames = torch.empty(0, dtype=torch.bfloat16)          # filled on the GPU by finalize()
+        else:
+            frames = self.frames.gather(flat).reshape(B, T, self.frames.n_tok, self.frames.dim)
+            frames = torch.from_numpy(frames.view(np.int16)).view(torch.bfloat16)
         e = self.ev
         return Batch(
             idx=torch.from_numpy(sidx.astype(np.int64)),
-            frames=torch.from_numpy(frames.view(np.int16)).view(torch.bfloat16),
+            frames=frames,
             ev_type=torch.from_numpy(e["ev_type"][flat].reshape(B, T, -1).astype(np.int64)),
             ev_xy=torch.from_numpy(e["ev_xy"][flat].reshape(B, T, -1, 4).astype(np.float32)),
             ev_scroll=torch.from_numpy(e["ev_scroll"][flat].reshape(B, T, -1).astype(np.float32)),
@@ -127,7 +170,14 @@ class SessionData:
             ev_text=torch.from_numpy(e["ev_text"][flat].reshape(B, T, -1).astype(np.int64)),
             valid=torch.from_numpy(valid),
             lengths=torch.from_numpy(lens),
+            gidx=torch.from_numpy(gidx.astype(np.int64)),
         )
+
+    def finalize(self, b: Batch) -> Batch:
+        """Call after b.to(device): materialize frame tokens for GPU-resident caches."""
+        if self.frames.on_gpu:
+            b.frames = self.frames.gather_torch(b.gidx)
+        return b
 
     def sample_positive_keys(self, sidx: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """Each session's positive is a random wording of its instruction (original or a kept paraphrase),
@@ -185,29 +235,3 @@ class Prefetcher:
                 nxt += 1
             yield b.to(self.device), ex
         self.pool.shutdown(wait=False)
-
-
-def stage_to_shm(src: Path, job_tag: str, include_crop: bool = True) -> Path:
-    """Copy the frame cache into /dev/shm (RAM) once per job so several runs on the node share one copy.
-    The persistent copy stays on NAS; the shm copy is removed by the sbatch script at exit."""
-    dst = Path("/dev/shm") / f"wfemb_frames_{job_tag}"
-    done = dst / ".complete"
-    if done.exists():
-        return dst
-    lock = Path(str(dst) + ".lock")
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL)
-        os.close(fd)
-    except FileExistsError:
-        import time
-        while not done.exists():
-            time.sleep(5)
-        return dst
-    import shutil
-    dst.mkdir(parents=True, exist_ok=True)
-    for f in sorted(src.glob("*")):
-        if f.suffix not in (".npy", ".json") or (f.name.startswith("crop_") and not include_crop):
-            continue
-        shutil.copy(f, dst / f.name)
-    done.touch()
-    return dst

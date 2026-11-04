@@ -24,6 +24,8 @@ def get_args(argv=None):
     ap.add_argument("--run", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--frames_dir", default=os.environ.get("WFEMB_FRAMES_DIR", str(paths.FRAMES)))
+    ap.add_argument("--frames_mode", default="gpu_fp8", choices=["gpu_fp8", "memmap"],
+                    help="gpu_fp8: frame cache resident on GPU as fp8; memmap: exact bf16 read from disk")
     # model
     ap.add_argument("--d", type=int, default=512)
     ap.add_argument("--h", type=int, default=1024)
@@ -80,7 +82,7 @@ def main(argv=None):
         print(json.dumps(rec), flush=True)
 
     t0 = time.time()
-    data = SessionData(Path(args.frames_dir), use_crop=args.use_crop)
+    data = SessionData(Path(args.frames_dir), use_crop=args.use_crop, frames_mode=args.frames_mode, device=device)
     if args.center_keys:
         tr = data.indices("train")
         mu = data.keys[tr].mean(0, keepdims=True)
@@ -134,6 +136,7 @@ def main(argv=None):
                 b, _ = next(it)
             except StopIteration:
                 break
+            data.finalize(b)
             data_wait += time.time() - tw
             bidx = b.idx.cpu().numpy()
             # paraphrase augmentation: a random wording of each instruction, re-drawn every time (main thread rng)

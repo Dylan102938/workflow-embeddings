@@ -29,7 +29,7 @@ echo "images done: $(date)"
 # 2) merge split archives -> single zip per OS group, then drop the parts
 for g in ubuntu_images win_mac_images; do
     if [ ! -f "$RAW/$g/merged.zip" ]; then
-        (cd "$RAW/$g" && zip -s 0 images.zip --out merged.zip.tmp && mv merged.zip.tmp merged.zip)
+        (cd "$RAW/$g" && zip -s 0 images.zip --out merged_tmp.zip && mv merged_tmp.zip merged.zip)
     fi
     unzip -l "$RAW/$g/merged.zip" | tail -1
 done

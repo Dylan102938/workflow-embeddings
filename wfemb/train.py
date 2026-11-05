@@ -75,6 +75,10 @@ def get_args(argv=None):
     # eval / logging
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--log_every", type=int, default=50)
+    ap.add_argument("--curve_splits", default="",
+                    help="comma list from {test,train}: also evaluate these at every eval for learning curves "
+                         "(logged only, never used for checkpoint selection; train = fixed subset of curve_n sessions)")
+    ap.add_argument("--curve_n", type=int, default=3050)
     ap.add_argument("--select_on", default="loss",
                     help="val metric for best.pt: loss | key_R@5 | jsession_R@5_cross_app | jsession_nDCG@10_cross_app ...")
     ap.add_argument("--max_steps", type=int, default=0, help="debug: stop early")
@@ -236,6 +240,10 @@ def main(argv=None):
                 eval_model = ema if ema is not None else model
                 m = evaluate(eval_model, data, "val", device, args.eval_theta_fn, U, train_idx)
                 rec = {"step": step, "epoch": epoch, **{f"val_{k_}": v for k_, v in m.items()}}
+                for csp in filter(None, args.curve_splits.split(",")):          # learning curves only
+                    cm = evaluate(eval_model, data, csp, device, args.eval_theta_fn, U, train_idx,
+                                  max_sessions=args.curve_n if csp == "train" else None)
+                    rec.update({f"{csp}_{k_}": v for k_, v in cm.items()})
                 log(rec)
                 state = {"model": eval_model.state_dict(), "cfg": dataclasses.asdict(cfg), "args": vars(args),
                          "step": step}

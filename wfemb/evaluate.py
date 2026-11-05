@@ -169,11 +169,18 @@ def evaluate(model, data: SessionData, split: str, device, theta_fn: float, U_tr
         sidx = np.sort(np.random.default_rng(0).choice(sidx, max_sessions, replace=False))
     d_all, k_all, lp_all, lens = embed_split(model, data, sidx, device)
     mix = lp_all is not None
-    U_split = torch.from_numpy(data.keys[sidx]).to(device)
-    U_ref = torch.cat([U_train, U_split])
-    g_ref = torch.from_numpy(np.concatenate([data.group[train_idx], data.group[sidx]])).to(device)
-    n_tr = len(train_idx)
     S = len(sidx)
+    if split == "train":
+        # training-set curve: score a train subset against the training keys only (same loss definition as val/test,
+        # eval mode: no dropout, no smoothing, no paraphrases); each session's target is its own column in U_train
+        U_ref = U_train
+        g_ref = torch.from_numpy(data.group[train_idx]).to(device)
+        tgt_all = torch.from_numpy(np.searchsorted(train_idx, sidx)).to(device)
+    else:
+        U_split = torch.from_numpy(data.keys[sidx]).to(device)
+        U_ref = torch.cat([U_train, U_split])
+        g_ref = torch.from_numpy(np.concatenate([data.group[train_idx], data.group[sidx]])).to(device)
+        tgt_all = torch.arange(S, device=device) + len(train_idx)
 
     tot_loss, tot_last, ranks_last, conf_last, correct_last, p_true_last = 0.0, 0.0, [], [], [], []
     T_bins = 10
@@ -188,7 +195,7 @@ def evaluate(model, data: SessionData, split: str, device, theta_fn: float, U_tr
         k = k_all[sl, :T, ..., None].to(device)
         logpi = lp_all[sl, :T].to(device) if mix else None
         valid = torch.arange(T, device=device)[None, :] < L[:, None]
-        target = torch.arange(sl.start, sl.stop, device=device) + n_tr
+        target = tgt_all[sl]
         own = U_ref[target]
         fn = false_negative_mask(U_ref, g_ref, own, g_ref[target], target, theta_fn)
         loss, ce, logits = info_nce(d, k, valid.float(), U_ref, own, target, fn, return_steps=True, logpi=logpi)

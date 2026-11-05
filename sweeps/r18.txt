@@ -1,0 +1,5 @@
+# Round 18: learning curves for the final report. Re-runs of the final configuration (r16_oai_dense_hist, seeds 0/1)
+# that also log test loss and a fixed 3,050-session train-subset loss (eval mode, same loss definition) at every eval.
+# Selection stays on val loss; curve evaluations are logged only.
+--run r18_final_curves --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --frames_dir /nas/ttl=60d/dfeng/workflow-embeddings/frames_dense --hist_queries 4 --static_queries 4 --keys_dir /nas/ucb/dfeng/data/workflow-embeddings/keys_openai --theta_fn 0.8 --eval_theta_fn 0.8 --curve_splits test,train
+--run r18_final_curves_seed1 --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --frames_dir /nas/ttl=60d/dfeng/workflow-embeddings/frames_dense --hist_queries 4 --static_queries 4 --keys_dir /nas/ucb/dfeng/data/workflow-embeddings/keys_openai --theta_fn 0.8 --eval_theta_fn 0.8 --curve_splits test,train --seed 1

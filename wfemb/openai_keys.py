@@ -62,6 +62,11 @@ def main():
     ap.add_argument("--out", default=str(paths.DATA / "keys_openai"))
     ap.add_argument("--para_keep_frac", type=float, default=0.927,
                     help="drift filter: keep this fraction of paraphrases (same fraction as the Qwen 0.6B key set)")
+    ap.add_argument("--para_theta", type=float, default=0.0,
+                    help="absolute drift threshold (cosine to the original key); overrides --para_keep_frac when > 0")
+    ap.add_argument("--paraphrases", default="", help="paraphrase json (default SHARED/paraphrases.json)")
+    ap.add_argument("--reuse_instr", default="",
+                    help="key-set dir whose cached instruction embeddings to copy, so keys.npy is identical")
     ap.add_argument("--batch", type=int, default=256, help="inputs per API request")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args()
@@ -72,7 +77,12 @@ def main():
 
     with open(paths.PREP / "sessions.pkl", "rb") as f:
         sessions = pickle.load(f)
-    paras = json.load(open(paths.SHARED / "paraphrases.json"))["paraphrases"]
+    paras = json.load(open(args.paraphrases or paths.SHARED / "paraphrases.json"))["paraphrases"]
+    if args.reuse_instr:
+        import shutil
+        for f in ("raw_instr.npy", "raw_instr.json"):
+            if not (out / f).exists():
+                shutil.copy(Path(args.reuse_instr) / f, out / f)
 
     instr = [s["instruction"] for s in sessions]
     uniq = sorted(set(instr))
@@ -93,7 +103,7 @@ def main():
     pvec = P[[fpos[t] for t in flat]]
     owner = np.asarray(owner)
     sims = (pvec * keys[owner]).sum(1)
-    theta = float(np.quantile(sims, 1 - args.para_keep_frac))
+    theta = args.para_theta if args.para_theta > 0 else float(np.quantile(sims, 1 - args.para_keep_frac))
     keep = sims > theta
     pvec, owner = pvec[keep], owner[keep]
     count = np.bincount(owner, minlength=len(sessions)).astype(np.int32)
@@ -108,7 +118,7 @@ def main():
     link.symlink_to(paths.SHARED / "text_vecs.npy")
 
     tokens = tok_i + tok_p
-    meta = {"model": args.model, "dim": int(keys.shape[1]), "label_source": "openai", "input_text_vecs": "Qwen3-0.6B",
+    meta = {"model": args.model, "paraphrases": str(args.paraphrases or paths.SHARED / "paraphrases.json"), "dim": int(keys.shape[1]), "label_source": "openai", "input_text_vecs": "Qwen3-0.6B",
             "theta_para": theta, "para_total": int(len(sims)), "para_kept": int(keep.sum()),
             "para_sim_quantiles": {q: float(np.quantile(sims, q)) for q in (0.05, 0.25, 0.5, 0.75, 0.95)},
             "sessions_with_paraphrase": int((count > 0).sum()), "api_tokens": int(tokens),

@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --exclude=ddpg.ist.berkeley.edu,dqn.ist.berkeley.edu,gail.ist.berkeley.edu,gan.ist.berkeley.edu,ppo.ist.berkeley.edu,vae.ist.berkeley.edu   # A100 nodes only (airl/sac: SXM4-80GB, cirl/rlhf: PCI-80GB)
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=72G           # page-cached frames are reclaimable: less RAM = more NAS reads, not OOM
+#SBATCH --mem=160G          # must hold the ~107 GB frame cache in page cache (72G measured ~20x slower: NAS re-reads)
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # Several training runs in one job, packed onto its GPUs (run i -> GPU i mod #GPUs), all reading ONE copy of the exact

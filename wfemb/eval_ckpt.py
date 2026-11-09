@@ -16,7 +16,7 @@ import torch
 from . import paths
 from .data import SessionData
 from .evaluate import evaluate
-from .model import ModelConfig, SessionStateMachine
+from .model import ModelConfig, build_model
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
             raise NotImplementedError("center_keys runs: re-derive the key transform before evaluating")
         train_idx = data.indices("train")
         U = torch.from_numpy(data.keys[train_idx]).to(device)
-        model = SessionStateMachine(ModelConfig(**state["cfg"]), torch.from_numpy(data.text_vecs)).to(device)
+        model = build_model(ModelConfig(**state["cfg"]), torch.from_numpy(data.text_vecs)).to(device)
         model.load_state_dict(state["model"])
         for split in args.splits:
             m = evaluate(model, data, split, device, a.get("eval_theta_fn", 0.9), U, train_idx, full=True)

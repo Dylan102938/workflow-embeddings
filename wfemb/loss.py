@@ -49,9 +49,26 @@ def smooth_targets(U, own_key, target, fn_mask, eps, tau):
     return q
 
 
-def info_nce(d, k, valid, U, pos_keys, target, fn_mask, return_steps=False, soft_targets=None, logpi=None):
-    """soft_targets [B, N] (training-time label smoothing) replaces the one-hot target when given."""
+def hard_negative_bias(U, own_key, target, fn_mask, beta):
+    """[B, N] additive logit bias that weights each negative j by w_j = exp(beta * cos(own_key, U_j)), normalized
+    so the weights of a row's negatives average 1 (Robinson et al. 2021, with hardness measured in the label space).
+    The target column gets 0; masked columns are -inf in the logits anyway."""
+    rows = torch.arange(len(target), device=U.device)
+    s = beta * (own_key @ U.T)
+    neg = ~fn_mask
+    neg[rows, target] = False
+    lme = torch.logsumexp(s.masked_fill(~neg, float("-inf")), -1, keepdim=True) - neg.sum(-1, keepdim=True).log()
+    bias = (s - lme).masked_fill(~neg, 0.0)
+    return bias
+
+
+def info_nce(d, k, valid, U, pos_keys, target, fn_mask, return_steps=False, soft_targets=None, logpi=None,
+             logit_bias=None):
+    """soft_targets [B, N] (training-time label smoothing) replaces the one-hot target when given.
+    logit_bias [B, N] (training only, e.g. hard-negative weights) is added to every step's logits."""
     logits = step_logits(d, k, U, pos_keys, target, fn_mask, logpi)
+    if logit_bias is not None:
+        logits = logits + logit_bias[:, None, :]
     B, T, N = logits.shape
     if soft_targets is None:
         ce = F.cross_entropy(logits.reshape(B * T, N), target.repeat_interleave(T), reduction="none").view(B, T)

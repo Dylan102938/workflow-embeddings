@@ -16,8 +16,8 @@ import torch
 from . import paths
 from .data import Prefetcher, SessionData, length_bucketed_batches
 from .evaluate import evaluate
-from .loss import false_negative_mask, info_nce, smooth_targets
-from .model import ModelConfig, SessionStateMachine
+from .loss import false_negative_mask, hard_negative_bias, info_nce, smooth_targets
+from .model import ModelConfig, build_model
 
 
 def get_args(argv=None):
@@ -61,6 +61,18 @@ def get_args(argv=None):
     ap.add_argument("--static_queries", type=int, default=0, help="learned whole-screen readout queries")
     ap.add_argument("--avg_grid", type=int, default=0, help="average-pool a dense global grid to this size on load")
     ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
+    # per-step transformer (wfemb/xformer.py)
+    ap.add_argument("--arch", default="pool_gru", choices=["pool_gru", "xf", "xf_gru"])
+    ap.add_argument("--n_layers", type=int, default=4)
+    ap.add_argument("--n_heads", type=int, default=8)
+    ap.add_argument("--n_kv_heads", type=int, default=0, help="grouped-query attention (0 = n_heads)")
+    ap.add_argument("--d_head", type=int, default=64)
+    ap.add_argument("--mlp_ratio", type=int, default=4)
+    ap.add_argument("--qkv_mode", default="shared", choices=["shared", "sep_q", "sep_qkv"])
+    ap.add_argument("--h_join", type=int, default=0,
+                    help="first block with the history token (negative: counted from the end, -1 = last block)")
+    ap.add_argument("--no_ev_pos", action="store_true", help="no position embedding for events within a step")
+    ap.add_argument("--xf_ckpt", action="store_true", help="activation checkpointing of transformer blocks")
     # loss
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
     ap.add_argument("--eval_theta_fn", type=float, default=0.9, help="fixed across runs so val metrics compare")
@@ -72,6 +84,10 @@ def get_args(argv=None):
     ap.add_argument("--label_smooth", type=float, default=0.0,
                     help="eps of similarity-based label smoothing (train only; eval stays plain CE)")
     ap.add_argument("--smooth_tau", type=float, default=0.05, help="temperature of the smoothing distribution")
+    ap.add_argument("--hard_neg", type=float, default=0.0,
+                    help="beta: weight each negative by exp(beta * cos(target key, its key)) (normalized to mean 1)")
+    ap.add_argument("--hard_neg_ramp", type=float, default=0.0,
+                    help="fraction of training over which beta ramps linearly from 0 to --hard_neg")
     # eval / logging
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--log_every", type=int, default=50)
@@ -145,14 +161,20 @@ def main(argv=None):
     pos_in_U = np.full(len(data.sessions), -1, np.int64)
     pos_in_U[train_idx] = np.arange(len(train_idx))
 
-    cfg = ModelConfig(d_key=U.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, d=args.d, h=args.h,
+    xf = args.arch != "pool_gru"
+    cfg = ModelConfig(d_key=U.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, d=args.d,
+                      h=args.d if xf else args.h,
                       n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
                       k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
                       tok_drop=args.tok_drop, prev_query=args.prev_query, gru_layers=args.gru_layers,
                       keep_bias=args.keep_bias, n_mix=args.n_mix, compress_latents=args.compress_latents,
                       compress_blocks=args.compress_blocks, hist_queries=args.hist_queries,
-                      static_queries=args.static_queries)
-    model = SessionStateMachine(cfg, torch.from_numpy(data.text_vecs)).to(device)
+                      static_queries=args.static_queries, n_heads=args.n_heads if xf else 8,
+                      arch=args.arch, n_layers=args.n_layers, n_kv_heads=args.n_kv_heads, d_head=args.d_head,
+                      mlp_ratio=args.mlp_ratio, qkv_mode=args.qkv_mode,
+                      h_join=args.h_join % args.n_layers if xf else 0, ev_pos=not args.no_ev_pos,
+                      e_max=int(data.ev["ev_type"].shape[1]), xf_ckpt=args.xf_ckpt)
+    model = build_model(cfg, torch.from_numpy(data.text_vecs)).to(device)
     ema = None
     if args.ema > 0:
         ema = copy.deepcopy(model)
@@ -219,7 +241,12 @@ def main(argv=None):
             fn = false_negative_mask(U, gU, U[target], gU[target], target, args.theta_fn)
             soft = (smooth_targets(U, U[target], target, fn, args.label_smooth, args.smooth_tau)
                     if args.label_smooth > 0 else None)
-            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn, soft_targets=soft, logpi=logpi)
+            bias = None
+            if args.hard_neg > 0:
+                ramp = min(1.0, step / max(1.0, args.hard_neg_ramp * total)) if args.hard_neg_ramp > 0 else 1.0
+                bias = hard_negative_bias(U, U[target], target, fn, args.hard_neg * ramp)
+            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn, soft_targets=soft, logpi=logpi,
+                            logit_bias=bias)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -239,7 +266,8 @@ def main(argv=None):
             if step % args.eval_every == 0 or step == total:
                 eval_model = ema if ema is not None else model
                 m = evaluate(eval_model, data, "val", device, args.eval_theta_fn, U, train_idx)
-                rec = {"step": step, "epoch": epoch, **{f"val_{k_}": v for k_, v in m.items()}}
+                rec = {"step": step, "epoch": epoch, "max_mem_gb": torch.cuda.max_memory_allocated() / 2**30,
+                       **{f"val_{k_}": v for k_, v in m.items()}}
                 for csp in filter(None, args.curve_splits.split(",")):          # learning curves only
                     cm = evaluate(eval_model, data, csp, device, args.eval_theta_fn, U, train_idx,
                                   max_sessions=args.curve_n if csp == "train" else None)

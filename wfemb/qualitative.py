@@ -21,7 +21,7 @@ from . import paths
 from .data import SessionData
 from .evaluate import embed_split, load_judged
 from .loss import false_negative_mask, info_nce
-from .model import ModelConfig, SessionStateMachine
+from .model import ModelConfig, build_model
 from .splitzip import SplitZip
 
 
@@ -60,7 +60,7 @@ def main():
     paths.KEYS = Path(a["keys_dir"]) if a.get("keys_dir") else paths.SHARED
     data = SessionData(Path(a.get("frames_dir") or paths.FRAMES), use_crop=bool(a.get("use_crop")),
                        frames_mode="gpu_fp8", device=device, avg_grid=a.get("avg_grid", 0))
-    model = SessionStateMachine(ModelConfig(**state["cfg"]), torch.from_numpy(data.text_vecs)).to(device)
+    model = build_model(ModelConfig(**state["cfg"]), torch.from_numpy(data.text_vecs)).to(device)
     model.load_state_dict(state["model"])
     theta = a.get("eval_theta_fn", 0.9)
 

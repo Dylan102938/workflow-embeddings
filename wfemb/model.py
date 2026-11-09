@@ -40,6 +40,17 @@ class ModelConfig:
     compress_blocks: int = 1   # (cross-attention + latent self-attention) blocks in the compressor
     hist_queries: int = 0      # readout queries derived from the recurrent state h[t-1] (pooling becomes sequential)
     static_queries: int = 0    # learned state- and action-independent readout queries (whole-screen inspection)
+    # ---- per-step transformer (wfemb/xformer.py); arch "pool_gru" is the model in this file ----
+    arch: str = "pool_gru"     # pool_gru | xf (transformer; h_t = its output at the history token) | xf_gru
+    n_layers: int = 4          # transformer blocks
+    n_kv_heads: int = 0        # grouped-query attention: key/value heads (0 = n_heads, i.e. multi-head attention)
+    d_head: int = 64
+    mlp_ratio: int = 4
+    qkv_mode: str = "shared"   # shared | sep_q (W_Q per token type) | sep_qkv (W_Q, W_K, W_V per token type)
+    h_join: int = 0            # first block in which the history token takes part (earlier blocks run in parallel)
+    ev_pos: bool = True        # learned position embedding of an event within its step
+    e_max: int = 8             # event slots per step
+    xf_ckpt: bool = False      # activation checkpointing of transformer blocks
 
     def __post_init__(self):
         # checkpoints from before prev_query became a mode string stored a bool; True meant "sum"
@@ -72,7 +83,8 @@ class EventEncoder(nn.Module):
         self.text_proj = nn.Linear(cfg.d_text, d)
         self.mlp = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 2 * d), nn.GELU(), nn.Linear(2 * d, d))
 
-    def forward(self, ev_type, ev_xy, ev_scroll, ev_keys, ev_text, text_table):
+    def forward(self, ev_type, ev_xy, ev_scroll, ev_keys, ev_text, text_table, per_event=False):
+        """Summed over a step's events: [..., d], [...]. per_event: [..., E, d] and the presence mask [..., E]."""
         present = ev_type > 0                                            # [..., E]
         xy_ok = ~torch.isnan(ev_xy)                                      # [..., E, 4]
         fx = self.fourier(torch.nan_to_num(ev_xy, 0.0))                  # [..., E, 4*2F]
@@ -85,6 +97,8 @@ class EventEncoder(nn.Module):
         h = h + self.text_proj(tv)
         h = h + self.mlp(h)
         h = h * present[..., None]
+        if per_event:
+            return h, present
         return h.sum(-2), present.any(-1)                                # [..., d], [...]
 
 
@@ -303,12 +317,22 @@ class SessionStateMachine(nn.Module):
             mask = mask.view(B, T, *mask.shape[1:]) if mask is not None else None
             h = self.h0.expand(B, -1).to(a.dtype)
             hs = []
+            # unbind (not [:, t] indexing): one stacked gradient instead of a full-size zero tensor per step
+            qs, ks, vs, avs, val = q.unbind(1), k.unbind(1), v.unbind(1), a.unbind(1), b.valid.unbind(1)
+            ms = mask.unbind(1) if mask is not None else [None] * T
             for t in range(T):
-                f = self.frame_pool.attend(q[:, t], k[:, t], v[:, t], None if mask is None else mask[:, t],
-                                           h=h[:, -self.cfg.h:])
-                z = self.drop(self.fuse(torch.cat([f, a[:, t]], -1)))
+                f = self.frame_pool.attend(qs[t], ks[t], vs[t], ms[t], h=h[:, -self.cfg.h:])
+                z = self.drop(self.fuse(torch.cat([f, avs[t]], -1)))
                 h_new = self.step(h, z)
-                h = torch.where(b.valid[:, t, None], h_new, h)
+                h = torch.where(val[t][:, None], h_new, h)
                 hs.append(h)
         hs = self.drop(torch.stack(hs, 1))
         return self.heads(hs)                                            # d, kappa, log pi (None if K = 1)
+
+
+def build_model(cfg: ModelConfig, text_table: torch.Tensor) -> nn.Module:
+    """The recurrent pooling model (arch pool_gru) or the per-step transformer (xf, xf_gru)."""
+    if cfg.arch == "pool_gru":
+        return SessionStateMachine(cfg, text_table)
+    from .xformer import TransformerStateMachine
+    return TransformerStateMachine(cfg, text_table)

@@ -29,7 +29,7 @@ def main():
     runs = sorted(p.name for p in paths.RUNS.iterdir() if p.is_dir() and any(p.name.startswith(x) for x in prefixes)
                   and (p / "log.jsonl").exists())
     hdr = f"{'run':24s} {'best@step':>9s} {'train':>6s} " + " ".join(f"{c[0]:>8s}" for c in COLS) + \
-          f" | {'test_loss':>9s} {'t_keyR@5':>8s} {'t_jnDCG':>7s}"
+          f" | {'test_loss':>9s} {'t_keyR@5':>8s} {'t_jR@5':>6s} {'t_jnDCG':>7s} | {'it/s':>5s} {'memGB':>5s}"
     print(hdr)
     print("-" * len(hdr))
     for run in runs:
@@ -44,7 +44,13 @@ def main():
         tail = ""
         if final:
             t = final["test"]
-            tail = f" | {t['loss']:9.3f} {t['key_R@5']:8.3f} {t.get('jsession_nDCG@10_cross_app', float('nan')):7.3f}"
+            tail = (f" | {t['loss']:9.3f} {t['key_R@5']:8.3f} {t.get('jsession_R@5_cross_app', float('nan')):6.3f}"
+                    f" {t.get('jsession_nDCG@10_cross_app', float('nan')):7.3f}")
+        else:
+            tail = " | " + " " * 34
+        sps = sorted(t["steps_per_s"] for t in tr if "steps_per_s" in t)
+        mem = max((r.get("max_mem_gb", 0) for r in val), default=0)
+        tail += f" | {sps[len(sps) // 2] if sps else 0:5.1f} {mem:5.1f}"
         done = "" if final else "*"
         print(f"{run + done:24s} {best['step']:9d} {trl:6.3f} {cells}{tail}")
     print("\n* = still running. Columns are the val metrics at the best-val-loss eval; train = mean train loss "

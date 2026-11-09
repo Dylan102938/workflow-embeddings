@@ -11,7 +11,7 @@ grep -v '^\s*#' "$FILE" | grep -v '^\s*$' | while read -r line; do
     name=$(echo "$line" | sed -n 's/.*--run \([^ ]*\).*/\1/p')
     d=$(echo "$line" | sed -n 's/.*--frames_dir \([^ ]*\).*/\1/p')
     for root in /dev/shm/wfemb_$JOB /tmp/wfemb_$JOB; do
-        if srun --jobid="$JOB" --overlap -n1 -c1 --mem=1G test -d "$root/$(basename "$d")" 2>/dev/null; then
+        if srun --jobid="$JOB" --overlap -n1 -c1 --mem=1G test -d "$root/$(basename "$d")" < /dev/null 2>/dev/null; then
             line=${line//"--frames_dir $d"/"--frames_dir $root/$(basename "$d")"}; break
         fi
     done

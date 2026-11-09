@@ -22,7 +22,9 @@ echo "$NG GPUs, $NCPU CPUs -> $W loader workers per shard; memory limit: $(cat /
 NSH=8                                         # shards per cache, built in waves of NG; finished shards leave local disk
 for spec in $SPECS; do
     enc=${spec%%:*}; grid=${spec##*:}
-    name=frames_dense$([ "$enc" = qwen25vl ] && echo _qwen25vl)$([ "$grid" != 16 ] && echo _g$grid)
+    name=frames_dense
+    if [ "$enc" = qwen25vl ]; then name+=_qwen25vl; fi
+    if [ "$grid" != 16 ]; then name+=_g$grid; fi
     part="$TEAM/bulk/$name.partial"; mkdir -p "$part"
     t1=$(date +%s)
     for ((w = 0; w < NSH; w += NG)); do

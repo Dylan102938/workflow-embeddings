@@ -86,16 +86,15 @@ class FrameDataset(torch.utils.data.Dataset):
 
 
 class QwenFrameDataset(torch.utils.data.Dataset):
-    """Whole screenshots for the Qwen2.5-VL vision tower: native aspect ratio, resized to <= max_pixels."""
+    """Whole screenshots for the Qwen2.5-VL vision tower: native aspect ratio, resized to <= max_pixels.
+    Workers only decode and resize (PIL bicubic, the resize Qwen2VLImageProcessor uses); rescaling, normalization and
+    patchifying run on the GPU (qwen_patchify), which removes the CPU bottleneck of the stock processor."""
 
     def __init__(self, items, model_name, max_pixels):
         self.items, self.model_name, self.max_pixels = items, model_name, max_pixels
         self.zips = None
 
     def _open(self):
-        from transformers import Qwen2VLImageProcessor
-        self.proc = Qwen2VLImageProcessor.from_pretrained(self.model_name, min_pixels=56 * 56,
-                                                          max_pixels=self.max_pixels)
         self.zips, self.index = {}, {}
         for src, zp in paths.ZIPS.items():
             self.zips[src] = SplitZip(zp)
@@ -105,6 +104,7 @@ class QwenFrameDataset(torch.utils.data.Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
+        from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
         if self.zips is None:
             self._open()
         gi, src, name = self.items[i][:3]
@@ -118,8 +118,27 @@ class QwenFrameDataset(torch.utils.data.Dataset):
         ok = img is not None
         if not ok:
             img = Image.new("RGB", (1280, 720))
-        out = self.proc(images=[img], return_tensors="pt")
-        return gi, ok, out["pixel_values"], out["image_grid_thw"][0]
+        h, w = smart_resize(img.height, img.width, factor=28, min_pixels=56 * 56, max_pixels=self.max_pixels)
+        img = img.resize((w, h), Image.BICUBIC)
+        return gi, ok, torch.from_numpy(np.asarray(img).copy()).permute(2, 0, 1), torch.tensor([1, h // 14, w // 14])
+
+
+QWEN_MEAN = (0.48145466, 0.4578275, 0.40821073)          # OPENAI_CLIP mean / std, as in Qwen2VLImageProcessor
+QWEN_STD = (0.26862954, 0.26130258, 0.27577711)
+
+
+def qwen_patchify(img: torch.Tensor, patch: int = 14, merge: int = 2, temporal: int = 2) -> torch.Tensor:
+    """uint8 [3, H, W] (already resized, on the GPU) -> Qwen2-VL flattened patches [gh * gw, 3 * temporal * patch^2],
+    in the processor's order (merge windows contiguous; a still image repeated over the temporal patch)."""
+    x = img.float() / 255.0
+    m = torch.tensor(QWEN_MEAN, device=x.device)[:, None, None]
+    s = torch.tensor(QWEN_STD, device=x.device)[:, None, None]
+    x = ((x - m) / s)[None].expand(temporal, -1, -1, -1)              # [temporal, C, H, W]
+    C, H, W = x.shape[1:]
+    gh, gw = H // patch, W // patch
+    x = x.reshape(1, temporal, C, gh // merge, merge, patch, gw // merge, merge, patch)
+    x = x.permute(0, 3, 6, 4, 7, 2, 1, 5, 8)
+    return x.reshape(gh * gw, C * temporal * patch * patch)
 
 
 def collate_list(batch):
@@ -311,14 +330,15 @@ def dense_main(args):
             return F.adaptive_avg_pool2d(x, grid)[0].flatten(1).T
 
         def encode_batch(batch):
-            gi, ok, pvs, thws = batch
+            gi, ok, imgs, thws = batch
+            pvs = [qwen_patchify(im.cuda(non_blocking=True)) for im in imgs]
             if attn == "flash_attention_2":        # whole batch in one varlen forward
                 thw = torch.stack(thws)
-                h = vision(torch.cat(pvs).cuda(non_blocking=True).to(torch.bfloat16), grid_thw=thw.cuda())
+                h = vision(torch.cat(pvs).to(torch.bfloat16), grid_thw=thw.cuda())
                 n = (thw.prod(1) // (merge * merge)).tolist()
                 outs = [pool_one(hi, t) for hi, t in zip(h.split(n), thws)]
             else:                                  # sdpa builds a dense mask: one screenshot per forward
-                outs = [pool_one(vision(pv.cuda(non_blocking=True).to(torch.bfloat16), grid_thw=t[None].cuda()), t)
+                outs = [pool_one(vision(pv.to(torch.bfloat16), grid_thw=t[None].cuda()), t)
                         for pv, t in zip(pvs, thws)]
             return gi, ok, torch.stack(outs)                               # [B, grid^2, dim] fp32
     else:

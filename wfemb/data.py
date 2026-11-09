@@ -1,9 +1,11 @@
 """Training-time data: frame cache + flat event arrays + frozen keys.
 
 Batches are padded B x T (length-bucketed). Events are gathered on CPU and moved to GPU by a background
-prefetch thread. Frame tokens either come from the memory-mapped bf16 cache on NAS (frames_mode="memmap",
-exact) or from a copy held in GPU memory as fp8-e4m3 (frames_mode="gpu_fp8", ~30 GB for the global tokens),
-which needs no host RAM and no data loading during training.
+prefetch thread. Frame tokens come from
+  frames_mode="ram"      the bf16 cache read fully into host RAM (exact; ~107 GB for the dense 16x16x512 cache),
+                         gathered per batch by the prefetch threads and copied to the GPU (default)
+  frames_mode="memmap"   the same bf16 cache memory-mapped from NAS (exact, little RAM, slower)
+  frames_mode="gpu_fp8"  a copy held in GPU memory as fp8-e4m3 (lossy; ~54 GB for the dense cache).
 """
 from __future__ import annotations
 
@@ -39,12 +41,23 @@ class Batch:
         return Batch(**{k: v.to(device, non_blocking=True) for k, v in self.__dict__.items()})
 
 
+def _read_into_ram(mm: np.memmap, chunk_bytes: int = 1 << 28) -> np.ndarray:
+    """Copy a read-only memmap into an ordinary in-RAM array with large sequential reads."""
+    out = np.empty(mm.shape, mm.dtype)
+    flat_in, flat_out = mm.reshape(len(mm), -1), out.reshape(len(out), -1)
+    rows = max(1, chunk_bytes // max(1, flat_in.shape[1] * mm.dtype.itemsize))
+    for a in range(0, len(mm), rows):
+        flat_out[a:a + rows] = flat_in[a:a + rows]
+    return out
+
+
 class FrameStore:
     """Concatenation of per-shard memmaps, addressed by global step index. Each frame's tokens are
     [global grid | action crop (optional) | effect crop of the previous action (optional)]."""
     on_gpu = False
 
-    def __init__(self, frames_dir: Path, use_crop: bool, extras: list[str] | tuple = (), avg_grid: int = 0):
+    def __init__(self, frames_dir: Path, use_crop: bool, extras: list[str] | tuple = (), avg_grid: int = 0,
+                 in_ram: bool = False):
         metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
         if not metas:
             raise FileNotFoundError(f"no frame cache in {frames_dir}")
@@ -75,6 +88,12 @@ class FrameStore:
         self.lo = np.array([s[0] for s in self.shards])
         self.hi = np.array([s[1] for s in self.shards])
         self.total = int(self.hi.max())
+        if in_ram:                                # read every token array into host RAM, shards in parallel
+            arrs = [a for _, _, parts in self.shards for a in parts]
+            with ThreadPoolExecutor(min(16, len(arrs))) as ex:
+                loaded = list(ex.map(_read_into_ram, arrs))
+            it = iter(loaded)
+            self.shards = [(lo, hi, [next(it) for _ in parts]) for lo, hi, parts in self.shards]
 
     def gather(self, gidx: np.ndarray) -> np.ndarray:
         """gidx: 1-D global step indices -> [len, n_tok, D] uint16 (bf16 bits)."""
@@ -125,7 +144,7 @@ class GPUFrameStore(FrameStore):
 
 
 class SessionData:
-    def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "memmap",
+    def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "ram",
                  device=None, extras: list[str] | tuple = (), avg_grid: int = 0):
         with open(paths.PREP / "sessions.pkl", "rb") as f:
             self.sessions = pickle.load(f)
@@ -154,7 +173,7 @@ class SessionData:
             self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, extras, avg_grid=avg_grid)
         else:
             assert not avg_grid, "avg_grid needs frames_mode=gpu_fp8"
-            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, extras)
+            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, extras, in_ram=frames_mode == "ram")
         assert self.frames.total == int(self.offset[-1] + self.length[-1]), "frame cache / events mismatch"
 
     def indices(self, split: str) -> np.ndarray:

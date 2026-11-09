@@ -26,8 +26,9 @@ def get_args(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--frames_dir", default=os.environ.get("WFEMB_FRAMES_DIR", str(paths.FRAMES)))
     ap.add_argument("--keys_dir", default="", help="text-embedder key set (default: paths.KEYS)")
-    ap.add_argument("--frames_mode", default="gpu_fp8", choices=["gpu_fp8", "memmap"],
-                    help="gpu_fp8: frame cache resident on GPU as fp8; memmap: exact bf16 read from disk")
+    ap.add_argument("--frames_mode", default="ram", choices=["ram", "memmap", "gpu_fp8"],
+                    help="ram: exact bf16 cache in host RAM, copied to the GPU per batch (needs ~110 GB host RAM "
+                         "for the dense cache); memmap: exact bf16 read from NAS; gpu_fp8: lossy fp8 copy on the GPU")
     # model
     ap.add_argument("--d", type=int, default=512)
     ap.add_argument("--h", type=int, default=1024)
@@ -72,7 +73,9 @@ def get_args(argv=None):
     ap.add_argument("--h_join", type=int, default=0,
                     help="first block with the history token (negative: counted from the end, -1 = last block)")
     ap.add_argument("--no_ev_pos", action="store_true", help="no position embedding for events within a step")
-    ap.add_argument("--xf_ckpt", action="store_true", help="activation checkpointing of transformer blocks")
+    ap.add_argument("--no_xf_ckpt", action="store_true",
+                    help="disable activation checkpointing of transformer blocks (on by default: same results, "
+                         "less memory, ~30%% slower)")
     # loss
     ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
     ap.add_argument("--eval_theta_fn", type=float, default=0.9, help="fixed across runs so val metrics compare")
@@ -173,7 +176,7 @@ def main(argv=None):
                       arch=args.arch, n_layers=args.n_layers, n_kv_heads=args.n_kv_heads, d_head=args.d_head,
                       mlp_ratio=args.mlp_ratio, qkv_mode=args.qkv_mode,
                       h_join=args.h_join % args.n_layers if xf else 0, ev_pos=not args.no_ev_pos,
-                      e_max=int(data.ev["ev_type"].shape[1]), xf_ckpt=args.xf_ckpt)
+                      e_max=int(data.ev["ev_type"].shape[1]), xf_ckpt=not args.no_xf_ckpt)
     model = build_model(cfg, torch.from_numpy(data.text_vecs)).to(device)
     ema = None
     if args.ema > 0:

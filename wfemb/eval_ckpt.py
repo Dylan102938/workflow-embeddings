@@ -36,7 +36,7 @@ def main():
         if key != data_key:                      # reload frames only when the token layout changes
             data, data_key = None, None
             torch.cuda.empty_cache()
-            data = SessionData(Path(a.get("frames_dir", paths.FRAMES)), use_crop=key[0], frames_mode="gpu_fp8",
+            data = SessionData(Path(a.get("frames_dir", paths.FRAMES)), use_crop=key[0], frames_mode=a.get("frames_mode", "gpu_fp8"),
                                device=device, extras=list(extras), avg_grid=a.get("avg_grid", 0))
             data_key = key
         if a.get("center_keys"):

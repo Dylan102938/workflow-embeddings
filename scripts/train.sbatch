@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --exclude=ddpg.ist.berkeley.edu,dqn.ist.berkeley.edu,gail.ist.berkeley.edu,gan.ist.berkeley.edu,ppo.ist.berkeley.edu,vae.ist.berkeley.edu   # A100 nodes only (airl/sac: SXM4-80GB, cirl/rlhf: PCI-80GB)
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=128G          # frames_mode=ram keeps the ~107 GB bf16 frame cache in host RAM
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # Usage: sbatch scripts/train.sbatch --run NAME [train args...]

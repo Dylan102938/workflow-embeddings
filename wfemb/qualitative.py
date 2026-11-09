@@ -59,7 +59,7 @@ def main():
     a = state["args"]
     paths.KEYS = Path(a["keys_dir"]) if a.get("keys_dir") else paths.SHARED
     data = SessionData(Path(a.get("frames_dir") or paths.FRAMES), use_crop=bool(a.get("use_crop")),
-                       frames_mode="gpu_fp8", device=device, avg_grid=a.get("avg_grid", 0))
+                       frames_mode=a.get("frames_mode", "gpu_fp8"), device=device, avg_grid=a.get("avg_grid", 0))
     model = build_model(ModelConfig(**state["cfg"]), torch.from_numpy(data.text_vecs)).to(device)
     model.load_state_dict(state["model"])
     theta = a.get("eval_theta_fn", 0.9)

@@ -293,7 +293,7 @@ def dense_main(args):
     dense:   every frame's global tokens on a --grid x --grid grid, centered and projected to --pca_dim."""
     qwen = args.encoder_type == "qwen25vl"
     suffix = "_qwen25vl" if qwen else ""
-    out_dir = paths.BULK / f"frames_dense{suffix}"
+    out_dir = paths.BULK / (f"frames_dense{suffix}" + (f"_g{args.grid}" if args.grid != 16 else ""))
     out_dir.mkdir(parents=True, exist_ok=True)
     pca_path = paths.BULK / f"dense_pca{suffix}_g{args.grid}_d{args.pca_dim}.npz"
     with open(paths.PREP / "sessions.pkl", "rb") as f:

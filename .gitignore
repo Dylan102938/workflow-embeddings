@@ -225,3 +225,4 @@ runs/
 *.npy
 *.npz
 *.pt
+sweeps/groups/

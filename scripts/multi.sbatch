@@ -5,12 +5,14 @@
 #SBATCH --gres=gpu:1
 #SBATCH --exclude=ddpg.ist.berkeley.edu,dqn.ist.berkeley.edu,gail.ist.berkeley.edu,gan.ist.berkeley.edu,ppo.ist.berkeley.edu,vae.ist.berkeley.edu,cirl.ist.berkeley.edu   # A100 nodes only (airl/sac: SXM4-80GB, rlhf: PCI-80GB); cirl excluded: its NFS client livelocks reading keys_openai/para_keys.npy and events.npz (2026-11-07, 2026-11-09)
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=170G          # the ~107 GB frame cache copy in /dev/shm is charged to the job + ~15 GB per run
+#SBATCH --mem=96G           # ~15 GB per run (incl. 5.4 GB pinned buffers); the page cache of the frame files is evictable
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # Several training runs in one job, packed onto its GPUs (run i -> GPU i mod #GPUs), all reading ONE copy of the exact
 # bf16 frame cache, read with preadv (frames_mode=pread; memory-mapping the 107 GB file from several long-running
-# multi-threaded processes stalls them after an hour or so, on NFS and on /dev/shm alike). The job first copies the cache from NAS to node-local storage (/dev/shm if it
+# multi-threaded processes stalls them after an hour or so, on NFS and on /dev/shm alike). By default frames are read
+# from the NAS files through the (evictable) page cache: a 99 GB /dev/shm copy is unevictable and on a node already
+# under memory pressure (sac, 2026-11-09) it made every allocation stall. With LOCAL_COPY=1 the job first copies the cache from NAS to node-local storage (/dev/shm if it
 # has room, else local disk /tmp) and its runs memory-map that copy: memory-mapping the NAS files directly is fast only
 # until another process on the node opens them, which invalidates the NFS page cache and drops runs to ~0.15 it/s.
 # Host RAM ~ 110 GB for the cache (when in /dev/shm, charged to this job) + ~15 GB per run.
@@ -26,7 +28,9 @@ DIRS=$(printf '%s\n' "${RUNS[@]}" | sed -n 's/.*--frames_dir \([^ ]*\).*/\1/p' |
 need=0; for d in $DIRS; do need=$(( need + $(du -sb "$d" | cut -f1) )); done
 shm_free=$(df -B1 --output=avail /dev/shm | tail -1); tmp_free=$(df -B1 --output=avail /tmp | tail -1)
 LOCAL=""
-if (( shm_free > need + 40 * 2**30 )); then LOCAL=/dev/shm/wfemb_$SLURM_JOB_ID
+if [ "${LOCAL_COPY:-0}" != "1" ]; then
+    echo "frames read with pread from $DIRS (page cache; set LOCAL_COPY=1 to copy them to /dev/shm first)"
+elif (( shm_free > need + 40 * 2**30 )); then LOCAL=/dev/shm/wfemb_$SLURM_JOB_ID
 elif (( tmp_free > need + 80 * 2**30 )); then LOCAL=/tmp/wfemb_$SLURM_JOB_ID; fi
 cleanup() { [ -n "$LOCAL" ] && rm -rf "$LOCAL"; }
 trap cleanup EXIT INT TERM
@@ -44,7 +48,7 @@ fi
 if [ -n "$LOCAL" ]; then
     for i in "${!RUNS[@]}"; do for d in $DIRS; do RUNS[$i]=${RUNS[$i]//"--frames_dir $d"/"--frames_dir $LOCAL/$(basename "$d")"}; done; done
     echo "frame caches ($(( need / 2**30 )) GB) copied to $LOCAL in $(( $(date +%s) - t0 ))s"
-elif [ -z "$LOCAL" ]; then
+elif [ "${LOCAL_COPY:-0}" = "1" ]; then
     echo "WARNING: no room on /dev/shm or /tmp for $(( need / 2**30 )) GB; runs read the NAS copy (slow if other jobs open it)"
 fi
 pids=()

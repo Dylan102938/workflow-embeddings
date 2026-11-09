@@ -179,7 +179,7 @@ class FrameStore:
                 else:
                     tmp = self._scratch(hi - lo)
                     arr._pread_full(tmp[:hi - lo], off)
-                    out[p0:p1] = tmp[gr[a:b] - lo]
+                    np.take(tmp, gr[a:b] - lo, axis=0, out=out[p0:p1])   # no temporary allocation
         if dup.any():
             src = np.maximum.accumulate(np.where(dup, 0, np.arange(n)))
             out[dup] = out[src[dup]]

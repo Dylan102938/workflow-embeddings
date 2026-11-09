@@ -12,6 +12,7 @@ prefetch thread. Frame tokens come from
 from __future__ import annotations
 
 import glob
+import io
 import json
 import os
 import pickle
@@ -46,6 +47,31 @@ class Batch:
         return Batch(**{k: v.to(device, non_blocking=True) for k, v in self.__dict__.items()})
 
 
+NFS_CHUNK = 1 << 20      # max bytes per read syscall on NFS
+
+
+def read_chunked(path) -> io.BytesIO:
+    """Whole file into memory with reads of at most NFS_CHUNK bytes. Large single reads (np.load reads a whole array in
+    one call) livelock the NFS client on memory-pressured nodes (cirl, sac: process spins in the kernel, rchar frozen),
+    while small reads (as cp does) keep working."""
+    size = os.path.getsize(path)
+    buf = bytearray(size)
+    mv = memoryview(buf)
+    with open(path, "rb", buffering=0) as f:
+        done = 0
+        while done < size:
+            n = f.readinto(mv[done:done + NFS_CHUNK])
+            if not n:
+                raise IOError(f"short read of {path} at {done}")
+            done += n
+    return io.BytesIO(buf)
+
+
+def np_load(path):
+    """np.load (.npy / .npz) via chunked reads."""
+    return np.load(read_chunked(path))
+
+
 class _PreadArray:
     """Row reads from a .npy file with os.preadv (no mmap). Memory-mapping the NFS-hosted cache from several processes
     makes page faults pathologically slow (1-50 s per batch even with the file in page cache); plain reads go through
@@ -68,8 +94,8 @@ class _PreadArray:
 
     def _pread_full(self, buf, offset):
         mv, done = memoryview(buf).cast("B"), 0
-        while done < len(mv):                              # preadv may return a partial read
-            n = os.preadv(self.fd, [mv[done:]], offset + done)
+        while done < len(mv):                              # partial reads; at most NFS_CHUNK per call (see read_chunked)
+            n = os.preadv(self.fd, [mv[done:done + NFS_CHUNK]], offset + done)
             if n <= 0:
                 raise IOError(f"short read at {offset + done}")
             done += n
@@ -247,21 +273,20 @@ class GPUFrameStore(FrameStore):
 class SessionData:
     def __init__(self, frames_dir: Path | None = None, use_crop: bool = False, frames_mode: str = "ram",
                  device=None, extras: list[str] | tuple = (), avg_grid: int = 0):
-        with open(paths.PREP / "sessions.pkl", "rb") as f:
-            self.sessions = pickle.load(f)
-        ev = np.load(paths.PREP / "events.npz")
+        self.sessions = pickle.load(read_chunked(paths.PREP / "sessions.pkl"))
+        ev = np_load(paths.PREP / "events.npz")
         self.ev = {k: ev[k] for k in ev.files}
         self.offset = self.ev["sess_offset"]
         self.length = self.ev["sess_len"]
         with open(paths.PREP / "vocab.json") as f:
             vocab = json.load(f)
         self.n_keys = len(vocab["key_vocab"])
-        self.keys = np.load(paths.KEYS / "keys.npy").astype(np.float32)
-        self.text_vecs = np.load(paths.KEYS / "text_vecs.npy")
+        self.keys = np_load(paths.KEYS / "keys.npy").astype(np.float32)
+        self.text_vecs = np_load(paths.KEYS / "text_vecs.npy")
         pk = paths.KEYS / "para_keys.npy"
         if pk.exists():
-            self.para_keys = np.load(pk).astype(np.float32)
-            pi = np.load(paths.KEYS / "para_index.npz")
+            self.para_keys = np_load(pk).astype(np.float32)
+            pi = np_load(paths.KEYS / "para_index.npz")
             self.para_offset, self.para_count = pi["offset"], pi["count"]
         else:
             self.para_keys = np.zeros((0, self.keys.shape[1]), np.float32)

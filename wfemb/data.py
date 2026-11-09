@@ -64,12 +64,31 @@ class _PreadArray:
     def __len__(self):
         return self.shape[0]
 
-    def read_into(self, rows, dest):
-        """dest[i] (a C-contiguous view of row_bytes) <- row rows[i]."""
-        for i, r in enumerate(rows):
-            buf = memoryview(dest[i]).cast("B")
-            n = os.preadv(self.fd, [buf], self.offset + int(r) * self.row_bytes)
-            assert n == self.row_bytes, (n, self.row_bytes)
+    def _pread_full(self, buf, offset):
+        mv, done = memoryview(buf).cast("B"), 0
+        while done < len(mv):                              # preadv may return a partial read
+            n = os.preadv(self.fd, [mv[done:]], offset + done)
+            if n <= 0:
+                raise IOError(f"short read at {offset + done}")
+            done += n
+
+    def read_rows(self, rows: np.ndarray, gap: int = 8) -> np.ndarray:
+        """rows (sorted ascending) -> [len(rows), ...]. Nearby rows are read as one contiguous span (a session's steps
+        are contiguous in the cache), so a batch costs ~one syscall per session instead of one per frame: per-call
+        GIL hand-offs against the training thread made per-frame reads ~50x slower inside a training process."""
+        out = np.empty((len(rows),) + tuple(self.shape[1:]), self.dtype)
+        if len(rows) == 0:
+            return out
+        breaks = np.nonzero(np.diff(rows) > gap)[0] + 1
+        for s, e in zip(np.r_[0, breaks], np.r_[breaks, len(rows)]):
+            lo, hi = int(rows[s]), int(rows[e - 1]) + 1
+            if hi - lo == e - s:                           # fully contiguous: read straight into the output
+                self._pread_full(out[s:e], self.offset + lo * self.row_bytes)
+            else:
+                tmp = np.empty((hi - lo,) + tuple(self.shape[1:]), self.dtype)
+                self._pread_full(tmp, self.offset + lo * self.row_bytes)
+                out[s:e] = tmp[rows[s:e] - lo]
+        return out
 
 
 def _read_into_ram(mm: np.memmap, chunk_bytes: int = 1 << 28) -> np.ndarray:
@@ -140,11 +159,8 @@ class FrameStore:
             order = np.argsort(rows)          # sorted reads are friendlier to the page cache
             rs = rows[order]
             if self.pread:
-                dest, c0 = sel[order], 0
-                for p in parts:
-                    c1 = c0 + p.shape[1]
-                    p.read_into(rs, [out[k, c0:c1] for k in dest])
-                    c0 = c1
+                urs, inv = np.unique(rs, return_inverse=True)  # padded batches repeat a session's last step
+                out[sel[order]] = np.concatenate([p.read_rows(urs)[inv] for p in parts], axis=1)
             else:
                 out[sel[order]] = np.concatenate([p[rs] for p in parts], axis=1)
         return out

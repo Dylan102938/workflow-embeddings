@@ -32,7 +32,7 @@ def embed_split(model, data: SessionData, sidx: np.ndarray, device, batch: int =
     rng = np.random.default_rng(0)
     for bidx in length_bucketed_batches(data.length, sidx, batch, rng, drop_last=False, max_frames=max_frames):
         b = data.finalize(data.make_batch(bidx).to(device))
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast(device.type if isinstance(device, torch.device) else "cuda", dtype=torch.bfloat16):
             d, k, logpi = model(b)
         rows = [pos[int(s)] for s in bidx]
         T = d.shape[1]

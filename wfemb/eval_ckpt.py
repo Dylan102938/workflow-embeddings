@@ -52,8 +52,12 @@ def main():
     ap.add_argument("--ckpt", default="best.pt")
     ap.add_argument("--finalize", action="store_true", help="write final.json + final log line (needs val and test)")
     ap.add_argument("--frames_mode", default="pread", help="how to read the frame cache (default pread)")
+    ap.add_argument("--device", default="cuda", help="cuda | cpu (evaluation needs no GPU; slower on CPU)")
     args = ap.parse_args()
-    device = torch.device("cuda")
+    device = torch.device(args.device)
+    if device.type == "cpu":
+        import os
+        torch.set_num_threads(int(os.environ.get("SLURM_CPUS_PER_TASK", "8")))
     data, data_key = None, None
     for run in args.runs:
         state = torch.load(paths.RUNS / run / args.ckpt, map_location=device, weights_only=False)

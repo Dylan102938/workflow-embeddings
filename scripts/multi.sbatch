@@ -9,7 +9,8 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # Several training runs in one job, packed onto its GPUs (run i -> GPU i mod #GPUs), all reading ONE copy of the exact
-# bf16 frame cache (frames_mode=memmap). The job first copies the cache from NAS to node-local storage (/dev/shm if it
+# bf16 frame cache, read with preadv (frames_mode=pread; memory-mapping the 107 GB file from several long-running
+# multi-threaded processes stalls them after an hour or so, on NFS and on /dev/shm alike). The job first copies the cache from NAS to node-local storage (/dev/shm if it
 # has room, else local disk /tmp) and its runs memory-map that copy: memory-mapping the NAS files directly is fast only
 # until another process on the node opens them, which invalidates the NFS page cache and drops runs to ~0.15 it/s.
 # Host RAM ~ 110 GB for the cache (when in /dev/shm, charged to this job) + ~15 GB per run.
@@ -50,7 +51,7 @@ pids=()
 for i in "${!RUNS[@]}"; do
     name=$(echo "${RUNS[$i]}" | sed -n 's/.*--run \([^ ]*\).*/\1/p')
     gpu=${GPUS[$(( i % ${#GPUS[@]} ))]}
-    CUDA_VISIBLE_DEVICES=$gpu $UV run python -m wfemb.train ${RUNS[$i]} --frames_mode memmap \
+    CUDA_VISIBLE_DEVICES=$gpu $UV run python -m wfemb.train ${RUNS[$i]} --frames_mode pread \
         > "$WFEMB_DATA/logs/run-$name.out" 2>&1 &
     pids+=($!)
     echo "launched $name on GPU $gpu (pid ${pids[-1]})"

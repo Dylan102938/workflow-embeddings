@@ -16,7 +16,7 @@ grep -v '^\s*#' "$FILE" | grep -v '^\s*$' | while read -r line; do
         fi
     done
     nohup setsid srun --jobid="$JOB" --overlap -n1 -c5 --mem=15G \
-        bash -c "cd $REPO && $UV run python -m wfemb.train $line --frames_mode memmap" \
+        bash -c "cd $REPO && $UV run python -m wfemb.train $line --frames_mode pread" \
         > "$WFEMB_DATA/logs/run-$name.out" 2>&1 < /dev/null &
     echo "attached $name to job $JOB: $(echo "$line" | grep -o -- '--frames_dir [^ ]*')"
     sleep 10

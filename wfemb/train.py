@@ -7,6 +7,7 @@ import dataclasses
 import json
 import math
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -116,6 +117,9 @@ def cosine_with_warmup(opt, warmup, total):
 
 def main(argv=None):
     args = get_args(argv)
+    # Prefetch threads hand the GIL back and forth with this Python-heavy training loop; at the default 5 ms switch
+    # interval batch building ran ~4.5x slower (0.59 vs 0.13 s per batch measured with 6 threads at 0.5 ms).
+    sys.setswitchinterval(5e-4)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -222,7 +226,7 @@ def main(argv=None):
             if epoch >= start:
                 sd = args.step_drop * max(0.0, 1 - (epoch - start) / (args.step_drop_anneal * n_ep))
         it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None, step_drop=sd,
-                             seed=args.seed * 1000 + epoch))
+                             seed=args.seed * 1000 + epoch, threads=6))
         while True:
             tw = time.time()
             try:

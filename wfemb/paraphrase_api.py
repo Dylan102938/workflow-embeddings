@@ -7,6 +7,7 @@ Paraphrases are only used for training sessions, so by default only training ins
 
   python -m wfemb.paraphrase_api submit --tag opus55 [--limit 30]     # creates the batch, saves its state
   python -m wfemb.paraphrase_api collect --tag opus55                 # waits for it, writes the json, prints cost
+  python -m wfemb.paraphrase_api test --limit 30                      # same requests via the Messages API (now)
 Needs ANTHROPIC_API_KEY.
 """
 from __future__ import annotations
@@ -56,7 +57,7 @@ def load_instructions(splits):
 
 def request(custom_id, items, n, effort):
     return {"custom_id": custom_id, "params": {
-        "model": MODEL, "max_tokens": 32000,
+        "model": MODEL, "max_tokens": 16000,
         "system": SYSTEM.format(n=n),
         "output_config": {"effort": effort, "format": {"type": "json_schema", "schema": SCHEMA}},
         "messages": [{"role": "user", "content":
@@ -136,9 +137,37 @@ def collect(args):
             print("  -", p)
 
 
+def test(args):
+    """The first requests synchronously through the Messages API (standard price), to check output and cost."""
+    import anthropic
+    from concurrent.futures import ThreadPoolExecutor
+    client = anthropic.Anthropic()
+    instr = load_instructions(set(args.splits.split(",")))[:args.limit or 30]
+    chunks = [list(enumerate(instr[i:i + args.per_request], start=i)) for i in range(0, len(instr), args.per_request)]
+
+    def run(items):
+        with client.messages.stream(**request("t", items, args.n, args.effort)["params"]) as st:
+            return items, st.get_final_message()
+    tok_in = tok_out = 0
+    with ThreadPoolExecutor(8) as ex:
+        for items, msg in ex.map(run, chunks):
+            tok_in += msg.usage.input_tokens
+            tok_out += msg.usage.output_tokens
+            res = {r["id"]: r["rewrites"] for r in json.loads(next(b.text for b in msg.content if b.type == "text"))["results"]}
+            for i, src in items[:2]:
+                print("\n#", src)
+                for p in res.get(i, []):
+                    print("  -", p)
+            print(f"[{len(res)}/{len(items)} ids returned, stop={msg.stop_reason}, out tokens {msg.usage.output_tokens}]")
+    per = len(instr)
+    batch_cost = tok_in / 1e6 * PRICE_PER_MTOK_BATCH["input"] + tok_out / 1e6 * PRICE_PER_MTOK_BATCH["output"]
+    print(f"\n{per} instructions: tokens in {tok_in:,} out {tok_out:,}; standard ${2 * batch_cost:.3f}, "
+          f"batch ${batch_cost:.3f}; per instruction (batch) ${batch_cost / per:.5f}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["submit", "collect"])
+    ap.add_argument("cmd", choices=["submit", "collect", "test"])
     ap.add_argument("--tag", default="opus55")
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--per_request", type=int, default=10)
@@ -147,7 +176,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--wait", action="store_true")
     args = ap.parse_args()
-    submit(args) if args.cmd == "submit" else collect(args)
+    {"submit": submit, "collect": collect, "test": test}[args.cmd](args)
 
 
 if __name__ == "__main__":

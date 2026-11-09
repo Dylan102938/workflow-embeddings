@@ -8,13 +8,14 @@ NEED_FLASH_ATTN=1 source baseten/setup.sh
 SPECS=${1:-"siglip2:16 siglip2:24 qwen25vl:16"}
 export WFEMB_DATA=$BT_SCRATCH_DIR/data WFEMB_BULK=$BT_SCRATCH_DIR/bulk
 mkdir -p "$WFEMB_DATA" "$WFEMB_BULK" "$TEAM/data" "$TEAM/bulk"
-t0=$(date +%s)
-hf download Dylan123/wfemb-data --repo-type dataset --local-dir "$BT_SCRATCH_DIR/wfemb-data" --token "$HF_TOKEN" >/dev/null
-cp -r "$BT_SCRATCH_DIR"/wfemb-data/{prepared,keys,keys_openai,keys_openai_p2} "$WFEMB_DATA/"
-cp "$BT_SCRATCH_DIR"/wfemb-data/bulk/*.npz "$WFEMB_BULK/"
-cp -r "$BT_SCRATCH_DIR"/wfemb-data/{prepared,keys,keys_openai,keys_openai_p2,bulk} "$TEAM/data/"   # for training jobs
-hf download xlangai/AgentNet --repo-type dataset --local-dir "$WFEMB_DATA/agentnet_raw" --max-workers 32 \
-    --include "*.jsonl" "ubuntu_images/*" "win_mac_images/*" >/dev/null
+t0=$(date +%s)                                  # inputs were downloaded to the team cache by baseten/download.sh
+cp -r "$TEAM"/data/{prepared,keys,keys_openai,keys_openai_p2} "$WFEMB_DATA/"
+cp "$TEAM"/data/bulk/*.npz "$WFEMB_BULK/"
+mkdir -p "$WFEMB_DATA/agentnet_raw/ubuntu_images" "$WFEMB_DATA/agentnet_raw/win_mac_images"
+cp "$TEAM"/raw/agentnet_raw/*.jsonl "$WFEMB_DATA/agentnet_raw/"
+for d in ubuntu_images win_mac_images; do
+    for f in "$TEAM/raw/agentnet_raw/$d"/*; do cp "$f" "$WFEMB_DATA/agentnet_raw/$d/" & done
+done; wait
 echo "data ready in $(( $(date +%s) - t0 ))s: $(du -sh "$WFEMB_DATA/agentnet_raw" | cut -f1) raw"
 NG=$(python -c "import torch; print(torch.cuda.device_count())")
 NCPU=$(nproc)

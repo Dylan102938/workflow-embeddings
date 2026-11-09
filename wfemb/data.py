@@ -15,6 +15,8 @@ import glob
 import json
 import os
 import pickle
+import queue
+import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -145,8 +147,50 @@ class FrameStore:
             it = iter(loaded)
             self.shards = [(lo, hi, [next(it) for _ in parts]) for lo, hi, parts in self.shards]
         self.pread = pread and not in_ram
+        self._tls = threading.local()
         if self.pread:                            # same files, read with preadv instead of page faults
             self.shards = [(lo, hi, [_PreadArray(a.filename) for a in parts]) for lo, hi, parts in self.shards]
+
+    def gather_into(self, gidx: np.ndarray, out: np.ndarray, gap: int = 8) -> np.ndarray:
+        """Like gather(), but fills a caller-provided [len, n_tok, D] uint16 buffer (e.g. a reusable pinned buffer) and
+        allocates nothing per call: frames are read with preadv straight into `out` (or via a per-thread scratch buffer
+        when a session span has dropped steps), and padded positions (a repeated row) are copied from the previous
+        row. Fresh multi-hundred-MB allocations per batch from several threads wedged training processes on the
+        mmap lock after ~2 h."""
+        if not (self.pread and all(len(parts) == 1 for _, _, parts in self.shards)):
+            out[:] = self.gather(gidx)
+            return out
+        g = np.asarray(gidx, np.int64)
+        n = len(g)
+        dup = np.r_[False, g[1:] == g[:-1]]
+        real = np.nonzero(~dup)[0]
+        if len(real):
+            gr = g[real]
+            sh = np.searchsorted(self.hi, gr, side="right")
+            brk = np.nonzero((np.diff(real) != 1) | (np.diff(gr) < 1) | (np.diff(gr) > gap) | (np.diff(sh) != 0))[0] + 1
+            for a, b in zip(np.r_[0, brk], np.r_[brk, len(real)]):
+                p0, p1 = int(real[a]), int(real[b - 1]) + 1          # contiguous output positions
+                lo_shard, _, parts = self.shards[sh[a]]
+                arr = parts[0]
+                lo, hi = int(gr[a]), int(gr[b - 1]) + 1
+                off = arr.offset + (lo - lo_shard) * arr.row_bytes
+                if hi - lo == p1 - p0:
+                    arr._pread_full(out[p0:p1], off)
+                else:
+                    tmp = self._scratch(hi - lo)
+                    arr._pread_full(tmp[:hi - lo], off)
+                    out[p0:p1] = tmp[gr[a:b] - lo]
+        if dup.any():
+            src = np.maximum.accumulate(np.where(dup, 0, np.arange(n)))
+            out[dup] = out[src[dup]]
+        return out
+
+    def _scratch(self, rows: int) -> np.ndarray:
+        buf = getattr(self._tls, "buf", None)
+        if buf is None or len(buf) < rows:
+            buf = np.empty((max(rows, 512), self.n_tok, self.dim), np.uint16)
+            self._tls.buf = buf
+        return buf
 
     def gather(self, gidx: np.ndarray) -> np.ndarray:
         """gidx: 1-D global step indices -> [len, n_tok, D] uint16 (bf16 bits)."""
@@ -238,7 +282,7 @@ class SessionData:
         return np.nonzero(self.split == split)[0]
 
     def make_batch(self, sidx: np.ndarray, max_len: int | None = None, step_drop: float = 0.0,
-                   seed: int | None = None) -> Batch:
+                   seed: int | None = None, frames_out: torch.Tensor | None = None) -> Batch:
         """step_drop > 0 (training only): each intermediate step is dropped with that probability; the final
         step (real final screen) is always kept, and the order of the kept steps is preserved."""
         if step_drop > 0:
@@ -265,6 +309,10 @@ class SessionData:
         flat = gidx.reshape(-1)
         if self.frames.on_gpu:
             frames = torch.empty(0, dtype=torch.bfloat16)          # filled on the GPU by finalize()
+        elif frames_out is not None and len(flat) <= len(frames_out):  # reusable (pinned) buffer, no allocation
+            buf = frames_out[:len(flat)]
+            self.frames.gather_into(flat, buf.numpy().view(np.uint16))
+            frames = buf.view(torch.bfloat16).view(B, T, self.frames.n_tok, self.frames.dim)
         else:
             frames = self.frames.gather(flat).reshape(B, T, self.frames.n_tok, self.frames.dim)
             frames = torch.from_numpy(frames.view(np.int16)).view(torch.bfloat16)
@@ -323,20 +371,66 @@ def length_bucketed_batches(lengths: np.ndarray, idx: np.ndarray, batch: int, rn
     return [out[i] for i in order]
 
 
-class Prefetcher:
-    """Builds batches on background threads (in order) and moves them to the GPU (pinned, non_blocking)."""
+class PinnedPool:
+    """A fixed set of pinned host buffers for frame tokens, allocated once per process and reused for every batch."""
 
-    def __init__(self, data: SessionData, batches: list[np.ndarray], device, extra=None, depth: int = 6,
-                 threads: int = 3, max_len: int | None = None, step_drop: float = 0.0, seed: int = 0):
+    def __init__(self, n: int, rows: int, n_tok: int, dim: int):
+        self.rows = rows
+        self.free = queue.Queue()
+        for _ in range(n):
+            self.free.put(torch.empty((rows, n_tok, dim), dtype=torch.int16).pin_memory())
+
+    def get(self):
+        return self.free.get()
+
+    def put(self, buf):
+        self.free.put(buf)
+
+
+_POOLS: dict = {}
+
+
+def pinned_pool(data: "SessionData", n: int, rows: int) -> PinnedPool:
+    key = (n, rows, data.frames.n_tok, data.frames.dim)
+    if key not in _POOLS:
+        _POOLS[key] = PinnedPool(n, rows, data.frames.n_tok, data.frames.dim)
+    return _POOLS[key]
+
+
+class Prefetcher:
+    """Builds batches on background threads (in order) and moves them to the GPU. Frame tokens are read straight into
+    one of a fixed set of pinned buffers (no per-batch allocation or pinning) and copied to the GPU synchronously, after
+    which the buffer is reused; the small event tensors are pinned per batch as before."""
+
+    def __init__(self, data: SessionData, batches: list[np.ndarray], device, extra=None, depth: int = 4,
+                 threads: int = 4, max_len: int | None = None, step_drop: float = 0.0, seed: int = 0,
+                 max_rows: int = 4096):
         self.data, self.batches, self.device, self.extra, self.max_len = data, batches, device, extra, max_len
         self.depth, self.step_drop, self.seed = depth, step_drop, seed
         self.pool = ThreadPoolExecutor(threads)
+        self.pins = None if data.frames.on_gpu else pinned_pool(data, depth + 1, max_rows)
 
     def _make(self, i):
-        b = self.data.make_batch(self.batches[i], self.max_len, self.step_drop, self.seed * 1_000_003 + i)
-        b = Batch(**{k: v.pin_memory() for k, v in b.__dict__.items()})
+        buf = self.pins.get() if self.pins is not None else None
+        b = self.data.make_batch(self.batches[i], self.max_len, self.step_drop, self.seed * 1_000_003 + i,
+                                 frames_out=buf)
+        in_buf = buf is not None and b.frames.numel() > 0 and b.frames.data_ptr() == buf.data_ptr()
+        if buf is not None and not in_buf:                    # batch larger than the buffer: fall back
+            self.pins.put(buf)
+            buf = None
+        b = Batch(**{k: (v if (k == "frames" and in_buf) else v.pin_memory()) for k, v in b.__dict__.items()})
         ex = self.extra(self.batches[i]) if self.extra else None
-        return b, ex
+        return b, ex, buf
+
+    def _to_device(self, b: Batch, buf):
+        out = {}
+        for k, v in b.__dict__.items():
+            if k == "frames" and buf is not None:
+                out[k] = v.to(self.device, non_blocking=False)   # buffer is reused right after this copy
+                self.pins.put(buf)
+            else:
+                out[k] = v.to(self.device, non_blocking=True)
+        return Batch(**out)
 
     def __iter__(self):
         n, nxt, futs = len(self.batches), 0, deque()
@@ -344,9 +438,9 @@ class Prefetcher:
             futs.append(self.pool.submit(self._make, nxt))
             nxt += 1
         for _ in range(n):
-            b, ex = futs.popleft().result()
+            b, ex, buf = futs.popleft().result()
             if nxt < n:
                 futs.append(self.pool.submit(self._make, nxt))
                 nxt += 1
-            yield b.to(self.device), ex
+            yield self._to_device(b, buf), ex
         self.pool.shutdown(wait=False)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import faulthandler
 import json
 import math
 import os
@@ -120,6 +121,9 @@ def main(argv=None):
     # Prefetch threads hand the GIL back and forth with this Python-heavy training loop; at the default 5 ms switch
     # interval batch building ran ~4.5x slower (0.59 vs 0.13 s per batch measured with 6 threads at 0.5 ms).
     sys.setswitchinterval(5e-4)
+    torch.set_num_threads(4)                                 # several runs share a job's cores
+    # If a run stops making progress for 15 min, dump every thread's stack to its log (re-armed at each log interval).
+    faulthandler.dump_traceback_later(900, exit=False)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -226,7 +230,7 @@ def main(argv=None):
             if epoch >= start:
                 sd = args.step_drop * max(0.0, 1 - (epoch - start) / (args.step_drop_anneal * n_ep))
         it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None, step_drop=sd,
-                             seed=args.seed * 1000 + epoch, threads=6))
+                             seed=args.seed * 1000 + epoch, max_rows=args.max_frames))
         while True:
             tw = time.time()
             try:
@@ -266,6 +270,8 @@ def main(argv=None):
             run_loss += loss.item()
             run_n += 1
             if step % args.log_every == 0:
+                faulthandler.cancel_dump_traceback_later()
+                faulthandler.dump_traceback_later(900, exit=False)
                 dt = time.time() - t_last
                 log({"step": step, "epoch": epoch, "train_loss": run_loss / run_n, "lr": sched.get_last_lr()[0],
                      "grad_norm": float(gn), "kappa_mean": float(k[b.valid].mean()),

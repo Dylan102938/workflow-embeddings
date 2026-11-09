@@ -4,13 +4,16 @@ Batches are padded B x T (length-bucketed). Events are gathered on CPU and moved
 prefetch thread. Frame tokens come from
   frames_mode="ram"      the bf16 cache read fully into host RAM (exact; ~107 GB for the dense 16x16x512 cache),
                          gathered per batch by the prefetch threads and copied to the GPU (default)
-  frames_mode="memmap"   the same bf16 cache memory-mapped from NAS (exact, little RAM, slower)
+  frames_mode="memmap"   the same bf16 cache memory-mapped (exact, little RAM; pathologically slow on NFS when several
+                         processes map it)
+  frames_mode="pread"    the same bf16 cache read row by row with preadv through the page cache (exact, little RAM)
   frames_mode="gpu_fp8"  a copy held in GPU memory as fp8-e4m3 (lossy; ~54 GB for the dense cache).
 """
 from __future__ import annotations
 
 import glob
 import json
+import os
 import pickle
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +44,34 @@ class Batch:
         return Batch(**{k: v.to(device, non_blocking=True) for k, v in self.__dict__.items()})
 
 
+class _PreadArray:
+    """Row reads from a .npy file with os.preadv (no mmap). Memory-mapping the NFS-hosted cache from several processes
+    makes page faults pathologically slow (1-50 s per batch even with the file in page cache); plain reads go through
+    the page cache without faulting pages into each process. Thread-safe (explicit offsets)."""
+
+    def __init__(self, path):
+        with open(path, "rb") as f:
+            version = np.lib.format.read_magic(f)
+            read_header = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+                           else np.lib.format.read_array_header_2_0)
+            shape, fortran, dtype = read_header(f)
+            assert not fortran, path
+            self.offset = f.tell()
+        self.fd = os.open(path, os.O_RDONLY)
+        self.shape, self.dtype = shape, np.dtype(dtype)
+        self.row_bytes = int(np.prod(shape[1:])) * self.dtype.itemsize
+
+    def __len__(self):
+        return self.shape[0]
+
+    def read_into(self, rows, dest):
+        """dest[i] (a C-contiguous view of row_bytes) <- row rows[i]."""
+        for i, r in enumerate(rows):
+            buf = memoryview(dest[i]).cast("B")
+            n = os.preadv(self.fd, [buf], self.offset + int(r) * self.row_bytes)
+            assert n == self.row_bytes, (n, self.row_bytes)
+
+
 def _read_into_ram(mm: np.memmap, chunk_bytes: int = 1 << 28) -> np.ndarray:
     """Copy a read-only memmap into an ordinary in-RAM array with large sequential reads."""
     out = np.empty(mm.shape, mm.dtype)
@@ -57,7 +88,7 @@ class FrameStore:
     on_gpu = False
 
     def __init__(self, frames_dir: Path, use_crop: bool, extras: list[str] | tuple = (), avg_grid: int = 0,
-                 in_ram: bool = False):
+                 in_ram: bool = False, pread: bool = False):
         metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
         if not metas:
             raise FileNotFoundError(f"no frame cache in {frames_dir}")
@@ -94,6 +125,9 @@ class FrameStore:
                 loaded = list(ex.map(_read_into_ram, arrs))
             it = iter(loaded)
             self.shards = [(lo, hi, [next(it) for _ in parts]) for lo, hi, parts in self.shards]
+        self.pread = pread and not in_ram
+        if self.pread:                            # same files, read with preadv instead of page faults
+            self.shards = [(lo, hi, [_PreadArray(a.filename) for a in parts]) for lo, hi, parts in self.shards]
 
     def gather(self, gidx: np.ndarray) -> np.ndarray:
         """gidx: 1-D global step indices -> [len, n_tok, D] uint16 (bf16 bits)."""
@@ -105,7 +139,14 @@ class FrameStore:
             rows = gidx[sel] - lo
             order = np.argsort(rows)          # sorted reads are friendlier to the page cache
             rs = rows[order]
-            out[sel[order]] = np.concatenate([p[rs] for p in parts], axis=1)
+            if self.pread:
+                dest, c0 = sel[order], 0
+                for p in parts:
+                    c1 = c0 + p.shape[1]
+                    p.read_into(rs, [out[k, c0:c1] for k in dest])
+                    c0 = c1
+            else:
+                out[sel[order]] = np.concatenate([p[rs] for p in parts], axis=1)
         return out
 
 
@@ -173,7 +214,8 @@ class SessionData:
             self.frames = GPUFrameStore(frames_dir or paths.FRAMES, use_crop, device, extras, avg_grid=avg_grid)
         else:
             assert not avg_grid, "avg_grid needs frames_mode=gpu_fp8"
-            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, extras, in_ram=frames_mode == "ram")
+            self.frames = FrameStore(frames_dir or paths.FRAMES, use_crop, extras, in_ram=frames_mode == "ram",
+                                     pread=frames_mode == "pread")
         assert self.frames.total == int(self.offset[-1] + self.length[-1]), "frame cache / events mismatch"
 
     def indices(self, split: str) -> np.ndarray:

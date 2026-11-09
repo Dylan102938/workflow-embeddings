@@ -26,9 +26,10 @@ def get_args(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--frames_dir", default=os.environ.get("WFEMB_FRAMES_DIR", str(paths.FRAMES)))
     ap.add_argument("--keys_dir", default="", help="text-embedder key set (default: paths.KEYS)")
-    ap.add_argument("--frames_mode", default="ram", choices=["ram", "memmap", "gpu_fp8"],
+    ap.add_argument("--frames_mode", default="ram", choices=["ram", "memmap", "pread", "gpu_fp8"],
                     help="ram: exact bf16 cache in host RAM, copied to the GPU per batch (needs ~110 GB host RAM "
-                         "for the dense cache); memmap: exact bf16 read from NAS; gpu_fp8: lossy fp8 copy on the GPU")
+                         "for the dense cache); memmap / pread: exact bf16 read from the files (pread avoids page "
+                         "faults; use it for shared or NFS-hosted caches); gpu_fp8: lossy fp8 copy on the GPU")
     # model
     ap.add_argument("--d", type=int, default=512)
     ap.add_argument("--h", type=int, default=1024)

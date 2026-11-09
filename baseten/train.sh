@@ -18,17 +18,19 @@ for d in $(printf '%s\n' "${RUNS[@]}" | sed -n 's/.*--frames_dir \([^ ]*\).*/\1/
     for f in "$WFEMB_BULK/$n"/*.npy; do cat "$f" > /dev/null & done; wait          # into the page cache
 done
 echo "data staged in $(( $(date +%s) - t0 ))s: $(du -sh "$WFEMB_BULK" | cut -f1) frames; mem $(free -g | awk '/Mem/{print $2"G total, "$7"G avail"}')"
-NG=$(nvidia-smi -L | wc -l); pids=()
+NG=$(nvidia-smi -L | wc -l); pids=(); tails=()
 for i in "${!RUNS[@]}"; do
     line=${RUNS[$i]}; name=$(echo "$line" | sed -n 's/.*--run \([^ ]*\).*/\1/p'); log=$WFEMB_DATA/logs/run-$name.out
     CUDA_VISIBLE_DEVICES=$(( i % NG )) python -m wfemb.train $line --frames_mode pread > "$log" 2>&1 &
     pids+=($!)
     (tail -n +1 -F "$log" 2>/dev/null | grep --line-buffered -E '"val_loss"|"final"|Traceback|Error|Timeout \(|total time' \
         | cut -c1-400 | sed -u "s/^/[$name] /") &
+    tails+=($!)
     echo "launched $name on GPU $(( i % NG ))"; sleep 15
 done
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
+sleep 5; for t in "${tails[@]}"; do pkill -P "$t" 2>/dev/null; kill "$t" 2>/dev/null; done   # stop the log streamers
 mkdir -p "${BT_CHECKPOINT_DIR:-$TEAM/ckpt}/runs" "$TEAM/runs"
 for line in "${RUNS[@]}"; do
     name=$(echo "$line" | sed -n 's/.*--run \([^ ]*\).*/\1/p')

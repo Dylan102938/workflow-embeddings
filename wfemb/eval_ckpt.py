@@ -55,6 +55,8 @@ def main():
     ap.add_argument("--device", default="cuda", help="cuda | cpu (evaluation needs no GPU; slower on CPU)")
     args = ap.parse_args()
     device = torch.device(args.device)
+    torch.backends.cuda.matmul.allow_tf32 = True           # as in train.py, so scores match the in-training evals
+    torch.backends.cudnn.allow_tf32 = True
     if device.type == "cpu":
         import os
         torch.set_num_threads(int(os.environ.get("SLURM_CPUS_PER_TASK", "8")))

@@ -1,6 +1,8 @@
 #!/bin/bash
 # Start extra training runs inside a RUNNING packed job (scripts/multi.sbatch) whose GPU has spare capacity, reusing the
 # job's node-local frame-cache copy (/dev/shm/wfemb_<job> or /tmp/wfemb_<job>). Runs as overlapping job steps.
+# CAUTION: do not attach checkpoint evaluation (eval_ckpt) to a GPU that is training: its scoring saturates the GPU and
+# training processes block in CUDA syncs while holding the GIL (round 22 ran ~20x slower, 2026-11-09).
 # CAUTION: the job ends when its own runs finish (Slurm then kills attached steps), so only attach runs that will finish
 # before the job's longest remaining run.
 # Usage (on rnn, from the repo): scripts/attach_runs.sh JOBID FILE   (FILE: one run's train args per line, like a sweep)

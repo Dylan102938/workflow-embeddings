@@ -1,3 +1,7 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Intent Replay</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -39,7 +43,7 @@ header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-cont
 .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .brand h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
 .brand p { margin: 0; color: var(--muted); font-size: 13px; }
-.top .model { color: var(--faint); font-size: 12px; }
+.top .model { color: var(--faint); font-size: 12px; font-family: var(--font-num); overflow-wrap: anywhere; min-width: 0; }
 
 .main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 18px; align-items: start; }
 @media (max-width: 1100px) { .main { grid-template-columns: minmax(0, 1fr); } }
@@ -176,6 +180,7 @@ header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-cont
 .howto code { font-family: var(--font-num); font-size: 11.5px; color: var(--muted); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
 .drop { position: fixed; inset: 0; z-index: 20; background: rgba(12,14,17,.86); display: grid; place-items: center; font-size: 18px; border: 3px dashed var(--this); }
 .err { color: #f08a6a; font-size: 12px; }
+.nomap { color: var(--faint); font-size: 12px; padding: 24px 0; text-align: center; }
 @media (prefers-reduced-motion: reduce) { .mk .ring { animation: none; opacity: .8; } .intent .bar span { transition: none; } }
 </style>
 
@@ -240,6 +245,7 @@ header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-cont
         <div><h3>Where the workflow embedding sits</h3><div class="sub" id="mapsub"></div></div>
         <div class="legend" id="legend"></div>
         <div class="mapwrap"><canvas id="map"></canvas><div class="tip" id="tip" hidden></div></div>
+        <div class="nomap" id="nomap" hidden>No background map in this bundle (background.json); run <code>python -m wfemb.demo background</code>.</div>
         <div class="nearhead">Closest test workflows to this step's embedding</div>
         <ol class="near" id="near"></ol>
       </section>
@@ -250,7 +256,7 @@ header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-cont
     <div><h3>Workflows</h3><div class="sub" id="plsub"></div></div>
     <div class="rail" id="rail"></div>
     <div class="howto">Any workflow can be replayed: record its screenshots and pyautogui-style actions, run
-      <code>python -m wfemb.demo export --raw my_workflow.json --single_file</code>, then open the file here or drop it on the page.</div>
+      <code id="howtocmd">python -m wfemb.demo export --id &lt;run id&gt; --raw my_workflow.json --single_file</code>, then open the file here or drop it on the page.</div>
   </section>
 </div>
 <input type="file" id="file" accept=".json,application/json" hidden>
@@ -271,26 +277,50 @@ async function getJSON(path) {
   if (!r.ok) throw new Error(path + ": " + r.status);
   return r.json();
 }
+// The bundle folder is given as ?bundle=<url> (e.g. /bundles/<run id>/ from the dashboard); same origin only.
+function bundleBase() {
+  const b = new URLSearchParams(location.search).get("bundle");
+  if (!b) return null;
+  try {
+    const u = new URL(b, location.href);
+    if (u.origin !== location.origin) return null;
+    return u.pathname.endsWith("/") ? u.pathname : u.pathname + "/";
+  } catch (e) { return null; }
+}
 async function boot() {
-  for (const base of ["", "bundle/"]) {
-    try { S.base = base; S.bg = await getJSON("background.json"); break; } catch (e) { S.bg = null; }
+  const base = bundleBase();
+  if (base != null) {
+    S.base = base;
+    try { S.bg = await getJSON("background.json"); } catch (e) { S.bg = null; }
+    try { S.index = await getJSON("workflows/index.json"); } catch (e) { S.index = []; }
   }
-  if (!S.bg) { $("title").textContent = "No bundle found next to this page (background.json)."; return; }
-  try { S.index = await getJSON("workflows/index.json"); } catch (e) { S.index = []; }
-  const ev = S.bg.explained;
-  $("modelinfo").textContent = `Model ${S.bg.run} · test set, apps unseen in training`;
-  $("mapsub").innerHTML = `2D PCA of the final embeddings of <span class="num">${S.bg.n.toLocaleString()}</span> test workflows ` +
-    `(axes explain <span class="num">${(ev[0] * 100).toFixed(1)}%</span> and <span class="num">${(ev[1] * 100).toFixed(1)}%</span> of variance)`;
-  $("plsub").textContent = `${S.index.length} test workflows from apps the model never trained on. ` +
-    `The last two are cases where the model ends up on the wrong intent.`;
-  computeClusterLabels();
+  setMapAvailable();
+  if (S.bg) {
+    const ev = S.bg.explained;
+    $("modelinfo").textContent = `Model ${S.bg.run} · test set, apps unseen in training`;
+    $("howtocmd").textContent = `python -m wfemb.demo export --id ${S.bg.run} --raw my_workflow.json --single_file`;
+    $("mapsub").innerHTML = `2D PCA of the final embeddings of <span class="num">${S.bg.n.toLocaleString()}</span> test workflows ` +
+      `(axes explain <span class="num">${(ev[0] * 100).toFixed(1)}%</span> and <span class="num">${(ev[1] * 100).toFixed(1)}%</span> of variance)`;
+    computeClusterLabels();
+  }
+  $("plsub").textContent = S.index.length ? `${S.index.length} test workflows from apps the model never trained on. ` +
+    `The last two are cases where the model ends up on the wrong intent.` : "No workflows in this bundle yet. Open an exported workflow file instead.";
   renderRail();
+  if (!S.index.length) {
+    $("title").textContent = base == null ? "No bundle given: open this page as demo.html?bundle=/bundles/<run id>/, or open a workflow file below."
+      : `No workflows found in ${base} (workflows/index.json).`;
+    return;
+  }
   const m = /^#wf-(\d+)$/.exec(location.hash);
   const i = m ? Math.min(Math.max(+m[1] - 1, 0), S.index.length - 1) : 0;
   if (S.index.length) await select(i);
 }
 
 // -------------------------------------------------------------------------------- playlist
+function setMapAvailable() {
+  $("map").hidden = !S.bg; $("legend").hidden = !S.bg; $("nomap").hidden = !!S.bg;
+  document.querySelector(".nearhead").hidden = !S.bg; $("near").hidden = !S.bg;
+}
 function renderRail() {
   const rail = $("rail");
   rail.innerHTML = "";
@@ -299,7 +329,7 @@ function renderRail() {
     b.className = "item"; b.dataset.i = i;
     const rank = e.final_rank;
     const thumb = e.thumb ? S.base + e.thumb : (e._thumb || "");
-    b.innerHTML = `<div class="th">${thumb ? `<img src="${thumb}" alt="" loading="lazy">` : ""}<span class="len num">${e.n_steps} steps</span></div>
+    b.innerHTML = `<div class="th">${thumb ? `<img src="${esc(thumb)}" alt="" loading="lazy">` : ""}<span class="len num">${e.n_steps} steps</span></div>
       <div class="bd"><div class="tt"></div><div class="mt"><span></span><span class="rk1 num"></span></div></div>`;
     b.querySelector(".tt").textContent = e.title;
     b.querySelector(".mt span").textContent = [e.app, osName(e.os)].filter(Boolean).join(" · ");
@@ -347,7 +377,7 @@ function load(wf) {
   $("intentsub").textContent = `Top 5 of ${wf.bank_size.toLocaleString()} known task instructions, after each step`;
   $("striplabel").textContent = wf.true_in_bank ? "Rank of the true instruction at each step (taller = closer to #1)"
     : "Model certainty at each step (taller = fewer plausible intents)";
-  buildStrip(); buildTicks(); computeDomain(); legend();
+  buildStrip(); buildTicks(); if (S.bg) { computeDomain(); legend(); }
   $("scrub").setAttribute("aria-valuemax", wf.n_steps);
   render(true);
 }
@@ -481,6 +511,7 @@ function renderIntents(t) {
 function renderNear(t) {
   const s = S.wf.steps[t], ol = $("near");
   ol.innerHTML = "";
+  if (!S.bg) return;
   for (const [bi, cos] of (s.near || [])) {
     const it = S.bg.items[bi];
     const li = document.createElement("li");
@@ -524,7 +555,7 @@ function headXY() {
 }
 function drawMap() {
   const cv = $("map");
-  if (!S.wf || !S.dom) return;
+  if (!S.wf || !S.dom || !S.bg) return;
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   const g = cv.getContext("2d");
@@ -608,7 +639,7 @@ function drawMap() {
 function roundRect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
 
 $("map").addEventListener("pointermove", (ev) => {
-  if (!S.proj) return;
+  if (!S.proj || !S.bg) return;
   const r = ev.currentTarget.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
   let best = -1, bd = 64;
   S.bg.points.forEach(([x, y], i) => { const d = (S.proj.sx(x) - mx) ** 2 + (S.proj.sy(y) - my) ** 2; if (d < bd) { bd = d; best = i; } });
@@ -625,7 +656,7 @@ $("map").addEventListener("pointermove", (ev) => {
   tip.style.top = Math.max(0, my + 14) + "px";
   drawMap();
 });
-$("map").addEventListener("pointerleave", () => { S.hover = -1; $("tip").hidden = true; drawMap(); });
+$("map").addEventListener("pointerleave", () => { S.hover = -1; $("tip").hidden = true; if (S.bg) drawMap(); });
 
 // -------------------------------------------------------------------------------- playback
 function seek(tau) { S.tau = Math.max(0, Math.min(S.wf.n_steps - 1e-6, tau)); render(); }

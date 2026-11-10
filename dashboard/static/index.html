@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wfemb runs</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 13 L5 7 L9 9 L15 2' fill='none' stroke='%232a78d6' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><b>wfemb</b><span>experiments</span></div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="runs">Runs <span class="count" id="n-runs"></span></button>
+    <button role="tab" data-tab="compare">Compare <span class="count" id="n-sel"></span></button>
+    <button role="tab" data-tab="group">Group by</button>
+    <button role="tab" data-tab="queue">Queue</button>
+    <button role="tab" data-tab="demo">Demo</button>
+  </nav>
+  <div class="topright">
+    <span class="health" id="health"></span>
+    <label class="switch" title="Re-read the results tree every 30 s"><input type="checkbox" id="live"><span>Auto-refresh</span></label>
+    <button class="btn icon" id="refresh" title="Refresh now (r)" aria-label="Refresh">
+      <svg viewBox="0 0 16 16" width="14" height="14"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span class="updated" id="updated"></span>
+  </div>
+</header>
+
+<main>
+  <!-- ------------------------------------------------------------------ runs -->
+  <section class="view" id="view-runs" hidden>
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="Filter ids: arch-gru seed-0 !dm-384   ( / )" autocomplete="off" spellcheck="false">
+      <div class="seg" id="stfilter" role="group" aria-label="Status filter"></div>
+      <label class="switch" title="Runs whose ids differ only in seed become one row (mean ± std)"><input type="checkbox" id="agg"><span>Merge seeds</span></label>
+      <span class="spacer"></span>
+      <span class="muted" id="selinfo"></span>
+      <button class="btn" id="sel-clear">Clear selection</button>
+      <button class="btn primary" id="go-compare">Compare</button>
+    </div>
+    <div class="varfilters" id="varfilters"></div>
+    <div class="fixed" id="fixed"></div>
+    <div class="tablewrap"><table class="grid runs" id="runs-table"></table></div>
+    <p class="empty" id="runs-empty" hidden></p>
+  </section>
+
+  <!-- ------------------------------------------------------------------ compare -->
+  <section class="view" id="view-compare" hidden>
+    <div class="toolbar">
+      <label class="ctl">Smoothing <input type="range" id="smooth" min="0" max="10" step="1"><span class="num" id="smooth-val"></span></label>
+      <label class="ctl">x <select id="xaxis"><option value="step">step</option><option value="epoch">epoch</option><option value="hours">hours</option></select></label>
+      <label class="switch"><input type="checkbox" id="raw"><span>Raw</span></label>
+      <label class="switch" title="Runs whose ids differ only in seed become one curve: mean, min-max band"><input type="checkbox" id="agg2"><span>Merge seeds</span></label>
+      <button class="btn" id="zoom-reset" hidden>Reset zoom</button>
+      <span class="spacer"></span>
+      <span class="hint">Drag on a chart to zoom · double-click to reset · hover a legend entry to highlight</span>
+    </div>
+    <div class="legend" id="legend"></div>
+    <p class="empty" id="compare-empty" hidden>No runs selected. Tick runs in <a href="" data-tab="runs">Runs</a> to compare them.</p>
+    <div id="compare-body">
+      <h2 class="sec">Training <span class="muted" id="train-note"></span></h2>
+      <div class="charts" id="charts-train"></div>
+      <h2 class="sec">Validation <span class="muted">every eval; ring = checkpoint chosen for final.json (lowest val_loss)</span></h2>
+      <div class="charts" id="charts-val"></div>
+      <h2 class="sec">Final metrics <span class="muted">final.json: val and test at the chosen checkpoint</span></h2>
+      <div class="tablewrap"><table class="grid final" id="final-table"></table></div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ group -->
+  <section class="view" id="view-group" hidden>
+    <div class="toolbar">
+      <label class="ctl">Group by <select id="gb"></select></label>
+      <label class="ctl">across <select id="gb2"></select></label>
+      <label class="ctl">Metric <select id="gm"></select></label>
+      <span class="spacer"></span>
+      <span class="muted" id="group-src"></span>
+    </div>
+    <div id="group-body"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ queue -->
+  <section class="view" id="view-queue" hidden>
+    <div class="toolbar">
+      <input type="search" id="qq" placeholder="Filter queue ids" autocomplete="off" spellcheck="false">
+      <div class="seg" id="qstfilter" role="group" aria-label="Status filter"></div>
+      <span class="spacer"></span>
+      <span class="muted" id="queue-summary"></span>
+    </div>
+    <div id="queue-body"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ demo -->
+  <section class="view" id="view-demo" hidden>
+    <div class="toolbar">
+      <label class="ctl">Run <select id="demo-run"></select></label>
+      <span class="spacer"></span>
+      <a class="btn" id="demo-open" target="_blank" rel="noopener" hidden>Open in new tab</a>
+    </div>
+    <div id="demo-msg"></div>
+    <iframe id="demo-frame" title="Intent Replay" hidden></iframe>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" hidden aria-label="Run detail">
+  <div class="drawer-head">
+    <div class="drawer-title" id="drawer-title"></div>
+    <button class="btn icon" id="drawer-close" aria-label="Close (Esc)">✕</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+<div class="toast" id="toast" hidden></div>
+
+<script src="charts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

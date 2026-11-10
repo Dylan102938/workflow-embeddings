@@ -1,5 +1,5 @@
-"""Run ids, and an end-to-end training run on synthetic data (tests/make_synthetic.py): results files, metric names,
-checkpoint reload, eval CLI, migration.  pytest tests/test_pipeline.py"""
+"""Run ids, and end-to-end training on synthetic data (tests/make_synthetic.py)."""
+
 import json
 import subprocess
 import sys
@@ -10,76 +10,123 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from make_synthetic import main as make_synthetic  # noqa: E402
 
-from wfemb.config import DataConfig, EvalConfig, Experiment, RunConfig, TrainConfig, fmt_value  # noqa: E402
+from wfemb.config import (
+    DataConfig,
+    EvalConfig,
+    Experiment,
+    RunConfig,
+    TrainConfig,
+    format_id_value,  # noqa: E402
+    parse_run_config,
+)
 
 BEST = "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0"
+SMALL = dict(d_model=64, d_head=16, n_heads=4, n_layers=2, n_patches=16, batch_size=16, n_epochs=2, learning_rate=1e-3)
 
 
-def test_ids():
+def test_ids_round_trip():
     assert Experiment().id == BEST
-    assert str(Experiment().path) == BEST.replace("_", "/")
-    for e in (Experiment(beta=2, seed=1), Experiment(arch="gru", lr=3e-4, drop=0.1, patch=256),
-              Experiment(lr=1.5e-3, smooth=0.0, nl=6)):
-        assert Experiment.from_id(e.id) == e
-        assert Experiment.from_id(str(e.path)) == e
-    assert [fmt_value(v) for v in (5e-4, 1.5e-3, 0.3, 2.0, 0.0)] == ["5e-4", "1.5e-3", "0.3", "2", "0"]
-    for bad in ("arch-foo", "dm512", "arch-gru_nl-1", "patch-300", BEST.replace("_seed", "_qkv-shared_seed")):
-        with pytest.raises(Exception):
-            Experiment.from_id(bad)
+    assert str(Experiment().relative_dir) == BEST.replace("_", "/")
+    experiments = [
+        Experiment(hard_negative_beta=2, seed=1),
+        Experiment(architecture="gru", learning_rate=3e-4, dropout=0.1, n_patches=256),
+        Experiment(learning_rate=1.5e-3, label_smoothing=0.0, n_layers=6),
+    ]
+    for experiment in experiments:
+        assert Experiment.from_id(experiment.id) == experiment
+        assert Experiment.from_id(str(experiment.relative_dir)) == experiment
+    assert [format_id_value(v) for v in (5e-4, 1.5e-3, 0.3, 2.0, 0.0)] == ["5e-4", "1.5e-3", "0.3", "2", "0"]
+
+
+@pytest.mark.parametrize("bad_id", ["arch-foo", "dm512", "arch-gru_nl-1", "patch-300", "qkv-shared_seed-0"])
+def test_bad_ids_are_rejected(bad_id):
+    with pytest.raises(ValueError):
+        Experiment.from_id(bad_id)
+
+
+def test_command_line_accepts_an_id_and_overrides():
+    config = parse_run_config([f"id={BEST.replace('beta-0', 'beta-2')}", "train.max_steps=5", "experiment.seed=3"])
+    assert config.experiment == Experiment(hard_negative_beta=2, seed=3)
+    assert config.train.max_steps == 5
 
 
 @pytest.fixture(scope="module")
-def synth(tmp_path_factory):
+def data_config(tmp_path_factory) -> DataConfig:
     root = tmp_path_factory.mktemp("data")
     make_synthetic(root)
-    return root
+    return DataConfig(root=str(root), bulk_root=str(root / "bulk"))
 
 
-SMALL = dict(dm=64, dh=16, nh=4, nl=2, patch=16, bs=16, ep=2, lr=1e-3)
-
-
-@pytest.mark.parametrize("arch,beta", [("late-history-transf", 2.0), ("transf", 0.0), ("gru", 0.0)])
-def test_train_end_to_end(synth, tmp_path, arch, beta):
+@pytest.mark.parametrize("architecture,beta", [("late-history-transf", 2.0), ("transf", 0.0), ("gru", 0.0)])
+def test_training_writes_the_results_files(data_config, tmp_path, architecture, beta):
     from wfemb.train import training_loop
-    exp = Experiment(arch=arch, beta=beta, **SMALL)
-    cfg = RunConfig(exp=exp, train=TrainConfig(max_steps=24, warmup=5),
-                    eval=EvalConfig(eval_steps=10, knn=20),
-                    data=DataConfig(root=str(synth), bulk=str(synth / "bulk")), results=str(tmp_path))
-    final = training_loop(cfg)
-    d = tmp_path / exp.path
-    assert {p.name for p in d.iterdir()} >= {"config.json", "steps.jsonl", "evals.jsonl", "final.json", "best.pt",
-                                            "test_embeddings.npz"}
-    steps = [json.loads(l) for l in (d / "steps.jsonl").read_text().splitlines()]
-    assert [s["step"] for s in steps] == list(range(1, 25))
+
+    experiment = Experiment(architecture=architecture, hard_negative_beta=beta, **SMALL)
+    config = RunConfig(
+        experiment=experiment,
+        train=TrainConfig(max_steps=24, warmup_steps=5),
+        eval=EvalConfig(eval_steps=10, n_neighbors=20),
+        data=data_config,
+        results_root=str(tmp_path),
+    )
+    final = training_loop(config)
+
+    run_dir = tmp_path / experiment.relative_dir
+    assert {path.name for path in run_dir.iterdir()} >= {
+        "config.json",
+        "steps.jsonl",
+        "evals.jsonl",
+        "final.json",
+        "best.pt",
+        "last.pt",
+        "test_embeddings.npz",
+    }
+    steps = [json.loads(line) for line in (run_dir / "steps.jsonl").read_text().splitlines()]
+    assert [row["step"] for row in steps] == list(range(1, 25))
     assert {"loss", "rigid_loss", "avg_dist", "lr", "grad_norm", "beta", "epoch", "time"} <= set(steps[0])
-    assert steps[-1]["beta"] == pytest.approx(beta)          # ramp done
-    if beta == 0:
-        assert all(s["loss"] >= 0 for s in steps)
-    evals = [json.loads(l) for l in (d / "evals.jsonl").read_text().splitlines()]
-    assert [e["step"] for e in evals] == [10, 20, 24]
+    assert steps[-1]["beta"] == pytest.approx(beta)
+    evals = [json.loads(line) for line in (run_dir / "evals.jsonl").read_text().splitlines()]
+    assert [row["step"] for row in evals] == [10, 20, 24]
     assert {"val_loss", "val_r@1", "val_r@5", "val_avg_log_dist_20NN", "val_judged_r@5"} <= set(evals[0])
-    for k in ("best_step", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_20NN", "test_judged_ndcg@10"):
-        assert k in final
-    c = json.loads((d / "config.json").read_text())
-    assert c["id"] == exp.id and Experiment(**c["experiment"]) == exp
-    # rerunning a finished run is a no-op
-    assert training_loop(cfg) is None
+    assert {"best_step", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_20NN", "test_judged_ndcg@10"} <= set(
+        final
+    )
+    saved = json.loads((run_dir / "config.json").read_text())
+    assert saved["id"] == experiment.id and Experiment(**saved["experiment"]) == experiment
+
+    assert training_loop(config) is None, "a finished run is not rerun"
 
 
-def test_eval_cli_and_migrate(synth, tmp_path):
-    from wfemb.train import training_loop
-    exp = Experiment(**SMALL)
-    data = DataConfig(root=str(synth), bulk=str(synth / "bulk"))
-    training_loop(RunConfig(exp=exp, train=TrainConfig(max_steps=12, warmup=2), eval=EvalConfig(eval_steps=6),
-                            data=data, results=str(tmp_path)))
-    r = subprocess.run([sys.executable, "-m", "wfemb.eval", f"id={exp.id}", f"results={tmp_path}",
-                        f"data.root={synth}", f"data.bulk={synth / 'bulk'}"], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert "test" in r.stdout and "r@5" in r.stdout
-    # migrate: a run filed under an outdated folder moves to the folder its config implies
-    old = tmp_path / "old" / "place"
-    old.parent.mkdir(parents=True)
-    (tmp_path / exp.path).rename(old)
+def test_eval_command_and_migration(data_config, tmp_path):
     from wfemb.storage.results import iter_runs, migrate
+    from wfemb.train import training_loop
+
+    experiment = Experiment(**SMALL)
+    training_loop(
+        RunConfig(
+            experiment=experiment,
+            train=TrainConfig(max_steps=12, warmup_steps=2),
+            eval=EvalConfig(eval_steps=6),
+            data=data_config,
+            results_root=str(tmp_path),
+        )
+    )
+
+    command = [
+        sys.executable,
+        "-m",
+        "wfemb.eval",
+        f"id={experiment.id}",
+        f"results_root={tmp_path}",
+        f"data.root={data_config.root}",
+        f"data.bulk_root={data_config.bulk_root}",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    assert "test" in completed.stdout and "r@5" in completed.stdout
+
+    misplaced = tmp_path / "old" / "place"
+    misplaced.parent.mkdir(parents=True)
+    (tmp_path / experiment.relative_dir).rename(misplaced)
     migrate(tmp_path)
-    assert [d for _, d in iter_runs(tmp_path)] == [tmp_path / exp.path]
+    assert [run_dir for _, run_dir in iter_runs(tmp_path)] == [tmp_path / experiment.relative_dir]

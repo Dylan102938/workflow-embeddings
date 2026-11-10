@@ -1,2 +1,1 @@
-"""Storage: data paths (paths.py), the frame-cache reader (frames.py), the results tree (results.py) and copying
-results from rnn / Baseten into it (fetch.py)."""
+"""Storage: data paths, the frame-cache reader, the results tree, the run queue, fetching results."""

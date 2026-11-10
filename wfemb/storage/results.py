@@ -1,143 +1,131 @@
-"""The results tree (docs/EXPERIMENTS.md): raw data of every run, one folder level per run-id segment.
+"""The results tree: each run's raw data in <root>/<one folder per id segment>/ (layout: docs/EXPERIMENTS.md).
 
-  <root>/arch-<v>/dm-<v>/.../seed-<v>/
-      config.json    full configuration + meta (written at start)
-      steps.jsonl    one row per training step
-      evals.jsonl    one row per validation pass
-      final.json     val/test metrics at the chosen checkpoint (written at the end; absent while running)
-      best.pt, last.pt
-
-Only raw data goes here; summaries and plots are computed by the dashboard.
-
-  python -m wfemb.storage.results list [--root results]       # every run: id, status, last step
-  python -m wfemb.storage.results migrate [--root results]    # re-derive folders from config.json (new variables)
+python -m wfemb.storage.results list       # every run: status, last step, id
+python -m wfemb.storage.results migrate    # move runs to the folders their config.json implies
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import math
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
-from ..config import Experiment, default_results
+import chz
 
-FILES = ("config.json", "steps.jsonl", "evals.jsonl", "final.json")
+from ..config import Experiment, default_results_root
 
 
-def clean(x):
-    """JSON-safe copy: NaN / inf -> None (browsers' JSON.parse rejects NaN), numpy scalars -> Python numbers."""
-    if isinstance(x, dict):
-        return {k: clean(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [clean(v) for v in x]
-    if hasattr(x, "item") and not isinstance(x, (str, bytes)):
-        x = x.item()
-    if isinstance(x, float) and not math.isfinite(x):
+def json_safe(value):
+    """NaN / inf become None (JSON.parse in browsers rejects them); numpy scalars become Python numbers."""
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
         return None
-    return x
+    return value
 
 
-def dumps(x) -> str:
-    return json.dumps(clean(x), allow_nan=False)
+def to_json(value, indent: int | None = None) -> str:
+    return json.dumps(json_safe(value), indent=indent, allow_nan=False)
 
 
 class RunWriter:
-    """Appends a run's rows. fresh=True starts the run over (drops rows of an earlier, unfinished attempt)."""
+    """Writes one run's files. Starting a writer discards the rows of an earlier, unfinished attempt."""
 
-    def __init__(self, run_dir: Path, fresh: bool = True):
-        self.dir = Path(run_dir)
-        self.dir.mkdir(parents=True, exist_ok=True)
-        if fresh:
-            for f in ("steps.jsonl", "evals.jsonl", "final.json"):
-                (self.dir / f).unlink(missing_ok=True)
-        self._steps = open(self.dir / "steps.jsonl", "a")
-        self._n = 0
+    FLUSH_EVERY = 50
 
-    def config(self, cfg: dict):
-        (self.dir / "config.json").write_text(json.dumps(clean(cfg), indent=1, allow_nan=False))
+    def __init__(self, run_dir: Path):
+        self.run_dir = Path(run_dir)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("steps.jsonl", "evals.jsonl", "final.json"):
+            (self.run_dir / name).unlink(missing_ok=True)
+        self._steps_file = open(self.run_dir / "steps.jsonl", "a")
+        self._unflushed = 0
 
-    def step(self, row: dict):
-        self._steps.write(dumps(row) + "\n")
-        self._n += 1
-        if self._n % 50 == 0:
-            self._steps.flush()
+    def write_config(self, config: dict):
+        (self.run_dir / "config.json").write_text(to_json(config, indent=1))
 
-    def eval(self, row: dict):
-        self._steps.flush()
-        with open(self.dir / "evals.jsonl", "a") as f:
-            f.write(dumps(row) + "\n")
+    def write_step(self, row: dict):
+        self._steps_file.write(to_json(row) + "\n")
+        self._unflushed += 1
+        if self._unflushed >= self.FLUSH_EVERY:
+            self._flush()
 
-    def final(self, metrics: dict):
-        self._steps.flush()
-        (self.dir / "final.json").write_text(json.dumps(clean(metrics), indent=1, allow_nan=False))
+    def write_eval(self, row: dict):
+        self._flush()
+        with open(self.run_dir / "evals.jsonl", "a") as file:
+            file.write(to_json(row) + "\n")
+
+    def write_final(self, metrics: dict):
+        self._flush()
+        (self.run_dir / "final.json").write_text(to_json(metrics, indent=1))
 
     def close(self):
-        self._steps.close()
+        self._steps_file.close()
+
+    def _flush(self):
+        self._steps_file.flush()
+        self._unflushed = 0
 
 
 def iter_runs(root: str | Path) -> Iterator[tuple[Experiment, Path]]:
-    """(experiment, run folder) of every run under root (folders holding a config.json)."""
-    for cfg in sorted(Path(root).rglob("config.json")):
-        c = json.loads(cfg.read_text())
-        yield Experiment(**c["experiment"]), cfg.parent
+    """(experiment, run folder) for every folder under root that holds a config.json."""
+    for config_path in sorted(Path(root).rglob("config.json")):
+        config = json.loads(config_path.read_text())
+        yield Experiment(**config["experiment"]), config_path.parent
 
 
 def read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    out = []
-    for line in path.read_text().splitlines():
-        if line.strip():
+    rows = []
+    if path.exists():
+        for line in path.read_text().splitlines():
             try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:        # a row being written right now
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:  # blank, or the row being written right now
                 pass
-    return out
-
-
-def status(run_dir: Path) -> str:
-    return "done" if (run_dir / "final.json").exists() else "unfinished"
+    return rows
 
 
 def migrate(root: Path, dry_run: bool = False):
-    """Move every run to the folder its config.json implies (after an experiment variable was added or renamed)."""
-    moved = 0
-    for exp, d in list(iter_runs(root)):
-        want = Path(root) / exp.path
-        if want.resolve() == d.resolve():
+    """After an experiment variable is added or renamed: move every run to the folder its config.json implies."""
+    n_moved = 0
+    for experiment, run_dir in list(iter_runs(root)):
+        target = Path(root) / experiment.relative_dir
+        if target.resolve() == run_dir.resolve():
             continue
-        print(f"{d.relative_to(root)} -> {want.relative_to(root)}")
-        moved += 1
+        print(f"{run_dir.relative_to(root)} -> {target.relative_to(root)}")
+        n_moved += 1
         if dry_run:
             continue
-        if want.exists():
-            raise FileExistsError(want)
-        want.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(d), str(want))
-        c = json.loads((want / "config.json").read_text())
-        c["id"], c["experiment"] = exp.id, json.loads(json.dumps(clean(vars_of(exp))))
-        (want / "config.json").write_text(json.dumps(c, indent=1))
-    print(f"{moved} run(s) {'to move' if dry_run else 'moved'}")
-
-
-def vars_of(exp: Experiment) -> dict:
-    return {k: getattr(exp, k) for k in Experiment.keys()}
+        if target.exists():
+            raise FileExistsError(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(run_dir), str(target))
+        config = json.loads((target / "config.json").read_text())
+        config["id"], config["experiment"] = experiment.id, chz.asdict(experiment)
+        (target / "config.json").write_text(to_json(config, indent=1))
+    print(f"{n_moved} run(s) {'to move' if dry_run else 'moved'}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["list", "migrate"])
-    ap.add_argument("--root", default=default_results())
-    ap.add_argument("--dry_run", action="store_true")
-    a = ap.parse_args()
-    if a.cmd == "migrate":
-        migrate(Path(a.root), a.dry_run)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["list", "migrate"])
+    parser.add_argument("--root", default=default_results_root())
+    parser.add_argument("--dry_run", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.command == "migrate":
+        migrate(Path(arguments.root), arguments.dry_run)
         return
-    for exp, d in iter_runs(a.root):
-        steps = read_jsonl(d / "steps.jsonl")
-        print(f"{status(d):10s} step {steps[-1]['step'] if steps else 0:>6}  {exp.id}")
+    for experiment, run_dir in iter_runs(arguments.root):
+        steps = read_jsonl(run_dir / "steps.jsonl")
+        status = "done" if (run_dir / "final.json").exists() else "unfinished"
+        print(f"{status:10s} step {steps[-1]['step'] if steps else 0:>6}  {experiment.id}")
 
 
 if __name__ == "__main__":

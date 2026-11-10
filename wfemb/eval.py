@@ -1,17 +1,9 @@
-"""Evaluation on val / test (metric definitions: docs/EXPERIMENTS.md, wfemb/metrics.py).
+"""Evaluation on the validation or test split. Metric definitions: docs/EXPERIMENTS.md.
 
-Candidates = the keys of all training instructions + the evaluated split's instructions (val/test instructions never
-occur in training, so each session's own key is a new candidate). False negatives are masked at the fixed threshold
-EvalConfig.dupmask so every run is scored the same way.
-
-  python -m wfemb.eval id=<run id>                       # the run's best checkpoint on the test set
-  python -m wfemb.eval id=<run id> split=val ckpt=last.pt
-  python -m wfemb.eval id=<run id> save=True             # also write <split>_embeddings.npz into the run folder
-
-<split>_embeddings.npz holds every step's direction and confidence (the raw data the demo is built from; training
-writes test_embeddings.npz at the end): sidx [S] session indices, offset / length [S], d [sum of lengths, D] fp16,
-k [sum of lengths] fp32; session i's steps are rows offset[i] .. offset[i] + length[i] - 1.
+python -m wfemb.eval id=<run id> [split=val] [checkpoint=last.pt] [save_embeddings=True]
+python -m wfemb.eval id=<run id> finalize=True     # redo a run's final evaluation and write final.json
 """
+
 from __future__ import annotations
 
 import time
@@ -21,105 +13,159 @@ import chz
 import numpy as np
 import torch
 
-from . import metrics as M
-from .config import DataConfig, EvalConfig, Experiment, default_results
-from .data import SessionData, TrainLabels, eval_batches
+from . import metrics
+from .config import DataConfig, EvalConfig, Experiment, default_results_root
+from .data import TrainingCandidates, WorkflowDataset, eval_batches
+from .storage.results import to_json
+
+SCORING_CHUNK = 64  # sessions scored at once: logits are [chunk, T, N]
+METRIC_ORDER = ("loss", "r@1", "r@5", "avg_log_dist", "judged_r@1", "judged_r@5", "judged_ndcg")
 
 
 @torch.no_grad()
-def embed(model, data: SessionData, sidx: np.ndarray, cfg: EvalConfig, device, data_cfg: DataConfig | None = None):
-    """Directions d [S, T_max, D] (fp16) and confidences kappa [S, T_max] (fp32) of every step, on the CPU, rows in
-    the order of sidx."""
+def embed_sessions(
+    model, dataset: WorkflowDataset, session_indices: np.ndarray, config: EvalConfig, device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Every step's direction [S, T, D] (float16) and confidence [S, T] on the CPU, in the given session order."""
     was_training = model.training
     model.eval()
-    T_max = int(data.length[sidx].max())
-    d_all = torch.zeros(len(sidx), T_max, data.keys.shape[1], dtype=torch.float16)
-    k_all = torch.zeros(len(sidx), T_max)
-    row = {int(s): i for i, s in enumerate(sidx)}
-    for b in eval_batches(data, sidx, cfg.batch, cfg.max_frames, device, data_cfg):
+    max_steps = int(dataset.lengths[session_indices].max())
+    directions = torch.zeros(len(session_indices), max_steps, dataset.label_keys.shape[1], dtype=torch.float16)
+    confidences = torch.zeros(len(session_indices), max_steps)
+    row_of_session = {int(session): row for row, session in enumerate(session_indices)}
+    for batch in eval_batches(dataset, session_indices, config.batch_size, config.max_frames_per_batch, device):
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            d, k = model(b)
-        rows = [row[int(s)] for s in b.idx.cpu()]
-        d_all[rows, :d.shape[1]] = d.half().cpu()
-        k_all[rows, :d.shape[1]] = k.squeeze(-1).float().cpu()
+            batch_directions, batch_confidences = model(batch)
+        rows = [row_of_session[int(session)] for session in batch.session_indices.cpu()]
+        n_steps = batch_directions.shape[1]
+        directions[rows, :n_steps] = batch_directions.half().cpu()
+        confidences[rows, :n_steps] = batch_confidences.squeeze(-1).float().cpu()
     model.train(was_training)
-    return d_all, k_all
+    return directions, confidences
 
 
-def save_embeddings(path: Path, sidx: np.ndarray, d_all: torch.Tensor, k_all: torch.Tensor, lens: torch.Tensor):
-    """Every valid step's d (fp16) and kappa, concatenated per session (format: module docstring)."""
-    L = lens.numpy()
-    tmp = Path(path).with_suffix(".tmp.npz")
-    np.savez(tmp, sidx=np.asarray(sidx), offset=np.r_[0, np.cumsum(L)[:-1]], length=L,
-             d=torch.cat([d_all[i, :n] for i, n in enumerate(L)]).numpy(),
-             k=torch.cat([k_all[i, :n] for i, n in enumerate(L)]).numpy())
-    tmp.rename(path)
+def save_embeddings(
+    path: Path, session_indices: np.ndarray, directions: torch.Tensor, confidences: torch.Tensor, lengths: np.ndarray
+):
+    """The valid steps of every session, concatenated: session i owns rows step_offsets[i] + range(lengths[i])."""
+    temporary = Path(path).with_suffix(".tmp.npz")
+    np.savez(
+        temporary,
+        session_indices=np.asarray(session_indices),
+        step_offsets=np.r_[0, np.cumsum(lengths)[:-1]],
+        lengths=lengths,
+        directions=torch.cat([directions[row, :length] for row, length in enumerate(lengths)]).numpy(),
+        confidences=torch.cat([confidences[row, :length] for row, length in enumerate(lengths)]).numpy(),
+    )
+    temporary.rename(path)
 
 
 @torch.no_grad()
-def evaluate(model, data: SessionData, split: str, labels: TrainLabels, cfg: EvalConfig, device,
-             data_cfg: DataConfig | None = None, embeddings_out: Path | None = None) -> dict:
-    """All metrics of one split, keyed f"{split}_<metric>". embeddings_out: also save every step's embedding there."""
-    sidx = data.indices(split)
-    S = len(sidx)
-    d_all, k_all = embed(model, data, sidx, cfg, device, data_cfg)
-    lens = torch.from_numpy(data.length[sidx].astype(np.int64))
-    if embeddings_out is not None:
-        save_embeddings(embeddings_out, sidx, d_all, k_all, lens)
-    U_ref = torch.cat([labels.U, torch.from_numpy(data.keys[sidx]).to(device)])          # [N + S, D]
-    g_ref = torch.cat([labels.group, torch.from_numpy(data.group[sidx]).to(device)])
-    tgt_all = torch.arange(S, device=device) + len(labels)
+def evaluate(
+    model,
+    dataset: WorkflowDataset,
+    split: str,
+    candidates: TrainingCandidates,
+    config: EvalConfig,
+    device,
+    embeddings_path: Path | None = None,
+) -> dict:
+    """All metrics of one split, named <split>_<metric>. The candidates are the training keys plus the split's."""
+    session_indices = dataset.sessions_in(split)
+    n_sessions = len(session_indices)
+    lengths = dataset.lengths[session_indices].astype(np.int64)
+    directions, confidences = embed_sessions(model, dataset, session_indices, config, device)
+    if embeddings_path is not None:
+        save_embeddings(embeddings_path, session_indices, directions, confidences, lengths)
+
+    keys = torch.cat([candidates.keys, torch.from_numpy(dataset.label_keys[session_indices]).to(device)])
+    groups = torch.cat([candidates.groups, torch.from_numpy(dataset.groups[session_indices]).to(device)])
+    targets = torch.arange(n_sessions, device=device) + len(candidates)
+    lengths = torch.from_numpy(lengths)
+
     loss_sum, ranks = 0.0, []
-    for s0 in range(0, S, 64):                                           # [64, T, N + S] logits per chunk
-        sl = slice(s0, min(S, s0 + 64))
-        L = lens[sl].to(device)
-        T = int(L.max())
-        valid = torch.arange(T, device=device)[None, :] < L[:, None]
-        target = tgt_all[sl]
-        fn = M.false_negative_mask(U_ref, g_ref, U_ref[target], g_ref[target], target, cfg.dupmask)
-        lg = M.logits(d_all[sl, :T].to(device), k_all[sl, :T, None].to(device), U_ref, fn)
-        loss, _ = M.info_nce(lg, target, valid)
-        loss_sum += loss.item() * len(target)
-        ranks.append(M.target_rank(M.terminal(lg, L), target).cpu())
+    for start in range(0, n_sessions, SCORING_CHUNK):
+        chunk = slice(start, start + SCORING_CHUNK)
+        chunk_lengths = lengths[chunk].to(device)
+        n_steps = int(chunk_lengths.max())
+        valid = torch.arange(n_steps, device=device)[None, :] < chunk_lengths[:, None]
+        mask = metrics.false_negative_mask(keys, groups, targets[chunk], config.duplicate_threshold)
+        logits = metrics.candidate_logits(
+            directions[chunk, :n_steps].to(device), confidences[chunk, :n_steps, None].to(device), keys, mask
+        )
+        loss, _ = metrics.info_nce(logits, targets[chunk], valid)
+        loss_sum += loss.item() * len(chunk_lengths)
+        ranks.append(metrics.target_ranks(metrics.at_last_step(logits, chunk_lengths), targets[chunk]).cpu())
     ranks = torch.cat(ranks)
-    E = M.terminal(d_all, lens).float()                                  # workflow embeddings [S, D]
-    out = {"loss": loss_sum / S, "r@1": M.recall_at_k(ranks, 1), "r@5": M.recall_at_k(ranks, 5),
-           f"avg_log_dist_{cfg.knn}NN": float(M.log_dist_knn(E.to(device), U_ref, g_ref, g_ref[tgt_all], cfg.knn).mean())}
-    rel = M.load_judged(data.judged_dir / f"judged_{split}.jsonl", sidx, data.group[sidx])
-    if rel is not None:
-        out.update(M.judged_retrieval(E, rel))
-    return {f"{split}_{k}": v for k, v in out.items()}
+
+    embeddings = metrics.at_last_step(directions, lengths).float()
+    log_distances = metrics.avg_log_dist_knn(embeddings.to(device), keys, groups, groups[targets], config.n_neighbors)
+    results = {
+        "loss": loss_sum / n_sessions,
+        "r@1": metrics.recall_at_k(ranks, 1),
+        "r@5": metrics.recall_at_k(ranks, 5),
+        f"avg_log_dist_{config.n_neighbors}NN": float(log_distances.mean()),
+    }
+    relevance = metrics.load_judged(
+        dataset.judged_dir / f"judged_{split}.jsonl", session_indices, dataset.groups[session_indices]
+    )
+    if relevance is not None:
+        results.update(metrics.judged_retrieval(embeddings, relevance))
+    return {f"{split}_{name}": value for name, value in results.items()}
 
 
-ORDER = ("loss", "r@1", "r@5", "avg_log_dist_100NN", "judged_r@1", "judged_r@5", "judged_ndcg@10")
-
-
-def format_metrics(m: dict, title: str = "") -> str:
-    """A table: one row per metric, one column per split present in m."""
-    splits = [s for s in ("val", "test") if any(k.startswith(s + "_") for k in m)]
-    names = [n for n in ORDER if any(f"{s}_{n}" in m for s in splits)]
+def format_metrics(results: dict, title: str = "") -> str:
+    """A table with one row per metric and one column per split in `results`."""
+    splits = [split for split in ("val", "test") if any(name.startswith(f"{split}_") for name in results)]
+    metric_names = {name.split("_", 1)[1] for name in results if name.startswith(tuple(f"{s}_" for s in splits))}
+    ordered = sorted(
+        metric_names,
+        key=lambda name: next(
+            (rank for rank, prefix in enumerate(METRIC_ORDER) if name.startswith(prefix)), len(METRIC_ORDER)
+        ),
+    )
     lines = [title] if title else []
-    lines.append(f"{'metric':<22}" + "".join(f"{s:>10}" for s in splits))
-    for n in names:
-        vals = [m.get(f"{s}_{n}") for s in splits]
-        lines.append(f"{n:<22}" + "".join(f"{v:>10.4f}" if isinstance(v, (int, float)) else f"{'-':>10}" for v in vals))
+    lines.append(f"{'metric':<22}" + "".join(f"{split:>10}" for split in splits))
+    for name in ordered:
+        values = [results.get(f"{split}_{name}") for split in splits]
+        cells = [f"{value:>10.4f}" if isinstance(value, (int, float)) else f"{'-':>10}" for value in values]
+        lines.append(f"{name:<22}" + "".join(cells))
     return "\n".join(lines)
 
 
-def main(id: str, split: str = "test", ckpt: str = "best.pt", results: str = "", device: str = "", save: bool = False,
-         data: DataConfig = DataConfig(), eval: EvalConfig = EvalConfig()):
+def main(
+    id: str,
+    split: str = "test",
+    checkpoint: str = "best.pt",
+    save_embeddings: bool = False,
+    finalize: bool = False,
+    results_root: str = "",
+    data: DataConfig = DataConfig(),
+    eval: EvalConfig = EvalConfig(),
+):
+    """finalize: redo a run's final evaluation (val and test, test embeddings saved) and write its final.json."""
     from .model import load_checkpoint
-    exp = Experiment.from_id(id)
-    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    experiment = Experiment.from_id(id)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cuda.matmul.allow_tf32 = True
-    run_dir = Path(results or default_results()) / exp.path
-    sd = SessionData(data, exp)
-    model, state = load_checkpoint(run_dir / ckpt, torch.from_numpy(sd.text_vecs), dev)
-    t0 = time.time()
-    m = evaluate(model, sd, split, TrainLabels(sd, dev), eval, dev, data,
-                 embeddings_out=run_dir / f"{split}_embeddings.npz" if save else None)
-    print(format_metrics(m, f"{exp.id}\n{ckpt} (step {state['step']}), {split}, {time.time() - t0:.0f}s"))
-    return m
+    run_dir = Path(results_root or default_results_root()) / experiment.relative_dir
+    dataset = WorkflowDataset(data, experiment)
+    candidates = TrainingCandidates(dataset, device)
+    model, saved = load_checkpoint(run_dir / checkpoint, torch.from_numpy(dataset.text_embeddings), device)
+
+    started = time.time()
+    results = {}
+    for evaluated_split in ("val", "test") if finalize else (split,):
+        save = save_embeddings or (finalize and evaluated_split == "test")
+        embeddings_path = run_dir / f"{evaluated_split}_embeddings.npz" if save else None
+        results.update(evaluate(model, dataset, evaluated_split, candidates, eval, device, embeddings_path))
+    if finalize:
+        final = {"best_step": saved["step"], "selected_on": "val_loss", **results}
+        (run_dir / "final.json").write_text(to_json(final, indent=1))
+    title = f"{experiment.id}\n{checkpoint} (step {saved['step']}), {time.time() - started:.0f}s"
+    print(format_metrics(results, title))
+    return results
 
 
 if __name__ == "__main__":

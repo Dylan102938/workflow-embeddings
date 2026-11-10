@@ -1,15 +1,8 @@
-"""Reading the frozen screen-feature cache (exact bf16) and other large arrays from NFS-hosted files.
+"""Reads the frozen screen-feature cache and other large arrays from NFS-hosted files.
 
-The cache of one grid size is a folder of shards: global_<tag>.npy [rows, n_tok, 512] (bf16 bits stored as uint16) and
-meta_<tag>.json {"lo", "hi", "dim", "global_tokens"}; rows lo..hi-1 are global step indices (all sessions' steps in
-order). Hard-won rules (rnn NFS, several training processes per node):
-  - read with preadv, never memory-map: page faults on a file mapped by several long-running multithreaded processes
-    stall them (1-50 s per batch, and after ~1 h a wedge on the mmap lock);
-  - read a session's steps as one contiguous span (one syscall per session, not per frame): per-call GIL hand-offs
-    against the training thread made per-frame reads ~50x slower;
-  - at most 1 MB per read call: large single reads livelock the NFS client on memory-pressured nodes;
-  - no per-batch allocations of large buffers: frames are read into a fixed pool of pinned buffers.
+The reading strategy (preadv, span reads, small chunks, pinned buffers) is explained in docs/ARCHITECTURE.md.
 """
+
 from __future__ import annotations
 
 import glob
@@ -23,142 +16,155 @@ from pathlib import Path
 import numpy as np
 import torch
 
-NFS_CHUNK = 1 << 20      # max bytes per read syscall on NFS
+MAX_READ_BYTES = 1 << 20  # larger single reads can livelock the NFS client
 
 
-def read_chunked(path) -> io.BytesIO:
-    """Whole file into memory with reads of at most NFS_CHUNK bytes."""
+def read_file(path) -> io.BytesIO:
+    """Whole file into memory, in reads of at most MAX_READ_BYTES."""
     size = os.path.getsize(path)
-    buf = bytearray(size)
-    mv = memoryview(buf)
-    with open(path, "rb", buffering=0) as f:
+    buffer = bytearray(size)
+    view = memoryview(buffer)
+    with open(path, "rb", buffering=0) as file:
         done = 0
         while done < size:
-            n = f.readinto(mv[done:done + NFS_CHUNK])
-            if not n:
-                raise IOError(f"short read of {path} at {done}")
-            done += n
-    return io.BytesIO(buf)
+            count = file.readinto(view[done : done + MAX_READ_BYTES])
+            if not count:
+                raise OSError(f"short read of {path} at byte {done}")
+            done += count
+    return io.BytesIO(buffer)
 
 
-def np_load(path):
-    """np.load (.npy / .npz) via chunked reads."""
-    return np.load(read_chunked(path))
+def load_numpy(path):
+    """np.load for .npy / .npz files on NFS."""
+    return np.load(read_file(path))
 
 
-class PreadArray:
-    """Row access to a .npy file with os.preadv (no mmap). Thread-safe (explicit offsets)."""
+class NpyRows:
+    """Row-range reads from a .npy file with preadv (no memory map). Safe to share between threads."""
 
     def __init__(self, path):
-        with open(path, "rb") as f:
-            version = np.lib.format.read_magic(f)
-            read_header = (np.lib.format.read_array_header_1_0 if version == (1, 0)
-                           else np.lib.format.read_array_header_2_0)
-            shape, fortran, dtype = read_header(f)
-            assert not fortran, path
-            self.offset = f.tell()
-        self.fd = os.open(path, os.O_RDONLY)
+        with open(path, "rb") as file:
+            version = np.lib.format.read_magic(file)
+            read_header = (
+                np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
+            )
+            shape, fortran_order, dtype = read_header(file)
+            assert not fortran_order, path
+            self.data_offset = file.tell()
+        self.file_descriptor = os.open(path, os.O_RDONLY)
         self.shape, self.dtype = shape, np.dtype(dtype)
         self.row_bytes = int(np.prod(shape[1:])) * self.dtype.itemsize
 
     def __len__(self):
         return self.shape[0]
 
-    def read_into(self, buf: np.ndarray, row: int):
-        """Fill buf (contiguous, len(buf) rows) with rows row.. of the file."""
-        mv, done, offset = memoryview(buf).cast("B"), 0, self.offset + row * self.row_bytes
-        while done < len(mv):
-            n = os.preadv(self.fd, [mv[done:done + NFS_CHUNK]], offset + done)
-            if n <= 0:
-                raise IOError(f"short read at {offset + done}")
-            done += n
+    def read_into(self, out: np.ndarray, first_row: int):
+        """Fills `out` (contiguous) with the rows starting at first_row."""
+        view = memoryview(out).cast("B")
+        offset = self.data_offset + first_row * self.row_bytes
+        done = 0
+        while done < len(view):
+            count = os.preadv(self.file_descriptor, [view[done : done + MAX_READ_BYTES]], offset + done)
+            if count <= 0:
+                raise OSError(f"short read at byte {offset + done}")
+            done += count
 
 
 class FrameStore:
-    """All steps' screen tokens [total, n_tok, dim] (bf16 bits as uint16), addressed by global step index."""
+    """Screen tokens of every step, [n_steps, n_patches, dim] as bfloat16 bits, addressed by global step index.
 
-    def __init__(self, frames_dir: Path):
-        frames_dir = Path(frames_dir)
-        metas = sorted(glob.glob(str(frames_dir / "meta_*.json")))
-        if not metas:
-            raise FileNotFoundError(f"no frame cache in {frames_dir}")
+    The cache folder holds shards: global_<tag>.npy and meta_<tag>.json with the shard's step range [lo, hi).
+    """
+
+    def __init__(self, cache_dir: Path):
+        cache_dir = Path(cache_dir)
+        meta_paths = sorted(glob.glob(str(cache_dir / "meta_*.json")))
+        if not meta_paths:
+            raise FileNotFoundError(f"no frame cache in {cache_dir}")
         shards = []
-        for mp in metas:
-            m = json.load(open(mp))
-            tag = Path(mp).stem.split("_", 1)[1]
-            shards.append((m["lo"], m["hi"], PreadArray(frames_dir / f"global_{tag}.npy")))
-        self.shards = sorted(shards, key=lambda s: s[0])
-        m0 = json.load(open(metas[0]))
-        self.dim, self.n_tok = m0["dim"], m0["global_tokens"]
-        self.hi = np.array([s[1] for s in self.shards])
-        self.total = int(self.hi.max())
-        self._tls = threading.local()
+        for meta_path in meta_paths:
+            meta = json.load(open(meta_path))
+            tag = Path(meta_path).stem.split("_", 1)[1]
+            shards.append((meta["lo"], meta["hi"], NpyRows(cache_dir / f"global_{tag}.npy")))
+        self.shards = sorted(shards, key=lambda shard: shard[0])
+        self.shard_ends = np.array([end for _, end, _ in self.shards])
+        self.n_steps = int(self.shard_ends.max())
+        self.dim, self.n_patches = meta["dim"], meta["global_tokens"]
+        self._thread_local = threading.local()
 
-    def gather_into(self, gidx: np.ndarray, out: np.ndarray, gap: int = 8) -> np.ndarray:
-        """Rows gidx -> out[:len(gidx)] (uint16 [*, n_tok, dim]) without allocating. Each run of increasing rows (a
-        session's kept steps) is one span read, straight into `out` or, if steps were dropped, via a per-thread scratch
-        buffer; repeated rows (padding repeats a session's last step) are copied from the previous row."""
-        g = np.asarray(gidx, np.int64)
-        n = len(g)
-        dup = np.r_[False, g[1:] == g[:-1]]
-        real = np.nonzero(~dup)[0]
-        if len(real):
-            gr = g[real]
-            sh = np.searchsorted(self.hi, gr, side="right")
-            brk = np.nonzero((np.diff(real) != 1) | (np.diff(gr) < 1) | (np.diff(gr) > gap) | (np.diff(sh) != 0))[0] + 1
-            for a, b in zip(np.r_[0, brk], np.r_[brk, len(real)]):
-                p0, p1 = int(real[a]), int(real[b - 1]) + 1          # contiguous output positions
-                lo_shard, _, arr = self.shards[sh[a]]
-                lo, hi = int(gr[a]), int(gr[b - 1]) + 1
-                if hi - lo == p1 - p0:
-                    arr.read_into(out[p0:p1], lo - lo_shard)
+    def read_into(self, step_indices: np.ndarray, out: np.ndarray, max_gap: int = 8) -> np.ndarray:
+        """Fills out[:len(step_indices)] without allocating.
+
+        Each run of increasing indices (one session's steps) is a single span read. Repeated indices (padding
+        repeats a session's last step) are copied from the previous row.
+        """
+        indices = np.asarray(step_indices, np.int64)
+        is_repeat = np.r_[False, indices[1:] == indices[:-1]]
+        positions = np.nonzero(~is_repeat)[0]
+        if len(positions):
+            steps = indices[positions]
+            shard_of = np.searchsorted(self.shard_ends, steps, side="right")
+            step_gaps = np.diff(steps)
+            run_breaks = (
+                np.nonzero(
+                    (np.diff(positions) != 1) | (step_gaps < 1) | (step_gaps > max_gap) | (np.diff(shard_of) != 0)
+                )[0]
+                + 1
+            )
+            for start, end in zip(np.r_[0, run_breaks], np.r_[run_breaks, len(positions)]):
+                shard_start, _, rows = self.shards[shard_of[start]]
+                first_step, last_step = int(steps[start]), int(steps[end - 1])
+                target = out[int(positions[start]) : int(positions[end - 1]) + 1]
+                span = last_step - first_step + 1
+                if span == end - start:
+                    rows.read_into(target, first_step - shard_start)
                 else:
-                    tmp = self._scratch(hi - lo)
-                    arr.read_into(tmp[:hi - lo], lo - lo_shard)
-                    np.take(tmp, gr[a:b] - lo, axis=0, out=out[p0:p1])
-        if dup.any():
-            src = np.maximum.accumulate(np.where(dup, 0, np.arange(n)))
-            out[dup] = out[src[dup]]
+                    scratch = self._scratch(span)
+                    rows.read_into(scratch[:span], first_step - shard_start)
+                    np.take(scratch, steps[start:end] - first_step, axis=0, out=target)
+        if is_repeat.any():
+            source = np.maximum.accumulate(np.where(is_repeat, 0, np.arange(len(indices))))
+            out[is_repeat] = out[source[is_repeat]]
         return out
 
-    def gather(self, gidx: np.ndarray) -> np.ndarray:
-        return self.gather_into(gidx, np.empty((len(gidx), self.n_tok, self.dim), np.uint16))
+    def read(self, step_indices: np.ndarray) -> np.ndarray:
+        return self.read_into(step_indices, np.empty((len(step_indices), self.n_patches, self.dim), np.uint16))
 
-    def _scratch(self, rows: int) -> np.ndarray:
-        buf = getattr(self._tls, "buf", None)
-        if buf is None or len(buf) < rows:
-            buf = np.empty((max(rows, 512), self.n_tok, self.dim), np.uint16)
-            self._tls.buf = buf
-        return buf
+    def _scratch(self, n_rows: int) -> np.ndarray:
+        scratch = getattr(self._thread_local, "scratch", None)
+        if scratch is None or len(scratch) < n_rows:
+            scratch = np.empty((max(n_rows, 512), self.n_patches, self.dim), np.uint16)
+            self._thread_local.scratch = scratch
+        return scratch
 
 
-def bf16(bits: np.ndarray) -> torch.Tensor:
-    """uint16 bf16 bits -> torch bfloat16 (no copy)."""
+def as_bfloat16(bits: np.ndarray) -> torch.Tensor:
+    """uint16 bit patterns -> bfloat16 tensor sharing the memory."""
     return torch.from_numpy(bits.view(np.int16)).view(torch.bfloat16)
 
 
-class PinnedPool:
-    """A fixed set of pinned host buffers [rows, n_tok, dim] for frame tokens, allocated once and reused."""
+class PinnedBufferPool:
+    """A fixed set of pinned host buffers for frame tokens, allocated once and reused for every batch."""
 
-    def __init__(self, n: int, rows: int, n_tok: int, dim: int):
-        self.rows = rows
-        self.free = queue.Queue()
-        for _ in range(n):
-            self.free.put(torch.empty((rows, n_tok, dim), dtype=torch.int16).pin_memory())
+    def __init__(self, n_buffers: int, n_rows: int, n_patches: int, dim: int):
+        self.n_rows = n_rows
+        self._free = queue.Queue()
+        for _ in range(n_buffers):
+            self._free.put(torch.empty((n_rows, n_patches, dim), dtype=torch.int16).pin_memory())
 
-    def get(self):
-        return self.free.get()
+    def take(self) -> torch.Tensor:
+        return self._free.get()
 
-    def put(self, buf):
-        self.free.put(buf)
-
-
-_POOLS: dict = {}
+    def give_back(self, buffer: torch.Tensor):
+        self._free.put(buffer)
 
 
-def pinned_pool(n: int, rows: int, n_tok: int, dim: int) -> PinnedPool:
-    """Process-wide pool (pinning is expensive and pinned memory is never returned)."""
-    key = (n, rows, n_tok, dim)
-    if key not in _POOLS:
-        _POOLS[key] = PinnedPool(n, rows, n_tok, dim)
-    return _POOLS[key]
+_pools: dict = {}
+
+
+def pinned_buffer_pool(n_buffers: int, n_rows: int, n_patches: int, dim: int) -> PinnedBufferPool:
+    """One pool per shape for the whole process: pinned memory is never returned to the system."""
+    key = (n_buffers, n_rows, n_patches, dim)
+    if key not in _pools:
+        _pools[key] = PinnedBufferPool(*key)
+    return _pools[key]

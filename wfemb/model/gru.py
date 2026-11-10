@@ -1,4 +1,5 @@
-"""The final block of arch `gru`: a GRU cell integrates the transformer's history-position output into the state."""
+"""The final block of architecture `gru`: a GRU cell folds the transformer's output into the state."""
+
 from __future__ import annotations
 
 import torch
@@ -6,14 +7,12 @@ import torch.nn as nn
 
 
 class GRUHead(nn.Module):
-    """h_t = LayerNorm(GRUCell(LayerNorm(x_t), h_{t-1})), x_t = the last transformer block's output at the history
-    position."""
-
-    def __init__(self, d: int):
+    def __init__(self, d_model: int):
         super().__init__()
-        self.norm_in = nn.LayerNorm(d)
-        self.cell = nn.GRUCell(d, d)
-        self.norm_out = nn.LayerNorm(d)
+        self.input_norm = nn.LayerNorm(d_model)
+        self.cell = nn.GRUCell(d_model, d_model)
+        self.output_norm = nn.LayerNorm(d_model)
 
-    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        return self.norm_out(self.cell(self.norm_in(x), h.to(x.dtype))).float()
+    def forward(self, block_output: torch.Tensor, previous_state: torch.Tensor) -> torch.Tensor:
+        new_state = self.cell(self.input_norm(block_output), previous_state.to(block_output.dtype))
+        return self.output_norm(new_state).float()

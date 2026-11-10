@@ -1,19 +1,14 @@
-"""Training / evaluation LABELS from OpenAI embeddings; the model's INPUT text features stay Qwen3-Embedding-0.6B.
+"""Label key set from OpenAI embeddings: instruction keys and paraphrase keys (training / evaluation targets).
 
-Builds a key-set directory (default DATA/keys_openai), loadable with `train.py --keys_dir`:
-  keys.npy        [S, D] float32   instruction keys (targets), session order
-  para_keys.npy   [M, D] float16   paraphrase keys passing the drift filter (augmented positives)
-  para_index.npz                   offset / count per session
-  text_vecs.npy   -> symlink to the Qwen3-0.6B typed-text vectors (model input features, unchanged)
-  raw_*.npy/json                   unique-string embeddings, so re-filtering needs no new API calls
-Needs OPENAI_API_KEY (runners/slurm/openai_keys.sbatch sources the repo's .env).
+  python -m wfemb.prep.openai_keys [--model text-embedding-3-large] [--out DATA/keys_openai] [--para_keep_frac 0.927]
+
+Needs OPENAI_API_KEY. File formats: docs/DATA_PREP.md.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import pickle
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,114 +16,145 @@ from pathlib import Path
 import numpy as np
 
 from ..storage import paths
+from . import key_set
+from .paraphrase import PARAPHRASES_PATH, load_paraphrases
+from .prepare import load_sessions
 
-PRICE_PER_MTOK = {"text-embedding-3-large": 0.13, "text-embedding-3-small": 0.02}
-
-
-def embed_unique(client, model, texts, batch, workers, cache_prefix):
-    """Embeds a list of unique strings (cached on disk under cache_prefix)."""
-    vec_path, txt_path = f"{cache_prefix}.npy", f"{cache_prefix}.json"
-    if os.path.exists(vec_path) and os.path.exists(txt_path) and json.load(open(txt_path)) == texts:
-        print(f"cached: {vec_path}", flush=True)
-        return np.load(vec_path), 0
-    chunks = [texts[i:i + batch] for i in range(0, len(texts), batch)]
-    out, tokens = [None] * len(chunks), [0]
-
-    def run(i):
-        inp = [t[:30000] if t.strip() else "." for t in chunks[i]]   # API rejects empty strings; 8191-token cap
-        r = client.embeddings.create(model=model, input=inp)
-        return i, np.array([d.embedding for d in sorted(r.data, key=lambda d: d.index)], np.float32), \
-            r.usage.total_tokens
-
-    t0, done = time.time(), 0
-    with ThreadPoolExecutor(workers) as ex:
-        for i, v, n in ex.map(run, range(len(chunks))):
-            out[i] = v
-            tokens[0] += n
-            done += 1
-            if done % 50 == 0 or done == len(chunks):
-                print(f"  {done}/{len(chunks)} requests  {tokens[0] / 1e6:.2f}M tokens  {time.time() - t0:.0f}s",
-                      flush=True)
-    vec = np.concatenate(out)
-    vec /= np.linalg.norm(vec, axis=1, keepdims=True)
-    np.save(vec_path, vec)
-    json.dump(texts, open(txt_path, "w"))
-    return vec, tokens[0]
+USD_PER_MILLION_TOKENS = {"text-embedding-3-large": 0.13, "text-embedding-3-small": 0.02}
+DEFAULT_USD_PER_MILLION_TOKENS = 0.13
+MAX_INPUT_CHARACTERS = 30000  # keeps every input under the API's 8191-token limit
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="text-embedding-3-large")
-    ap.add_argument("--out", default=str(paths.DATA / "keys_openai"))
-    ap.add_argument("--para_keep_frac", type=float, default=0.927,
-                    help="drift filter: keep this fraction of paraphrases (same fraction as the Qwen 0.6B key set)")
-    ap.add_argument("--batch", type=int, default=256, help="inputs per API request")
-    ap.add_argument("--workers", type=int, default=6)
-    args = ap.parse_args()
+def main() -> None:
+    args = parse_arguments()
     from openai import OpenAI
+
     client = OpenAI(max_retries=10)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sessions = load_sessions()
+    paraphrases = load_paraphrases()
 
-    with open(paths.PREP / "sessions.pkl", "rb") as f:
-        sessions = pickle.load(f)
-    paras = json.load(open(paths.SHARED / "paraphrases.json"))["paraphrases"]
-
-    instr = [s["instruction"] for s in sessions]
-    uniq = sorted(set(instr))
-    U, tok_i = embed_unique(client, args.model, uniq, args.batch, args.workers, str(out / "raw_instr"))
-    pos = {t: i for i, t in enumerate(uniq)}
-    keys = U[[pos[t] for t in instr]]
-    np.save(out / "keys.npy", keys.astype(np.float32))
+    instructions = [session["instruction"] for session in sessions]
+    keys, instruction_tokens = embed_each(client, args, instructions, output_dir / "raw_instr")
+    np.save(output_dir / "keys.npy", keys.astype(np.float32))
     print("keys", keys.shape, flush=True)
 
-    flat, owner = [], []
-    for si, s in enumerate(sessions):
-        for p in paras.get(s["instruction"], []):
-            flat.append(p)
-            owner.append(si)
-    uflat = sorted(set(flat))
-    P, tok_p = embed_unique(client, args.model, uflat, args.batch, args.workers, str(out / "raw_para"))
-    fpos = {t: i for i, t in enumerate(uflat)}
-    pvec = P[[fpos[t] for t in flat]]
-    owner = np.asarray(owner)
-    sims = (pvec * keys[owner]).sum(1)
-    theta = float(np.quantile(sims, 1 - args.para_keep_frac))
-    keep = sims > theta
-    pvec, owner = pvec[keep], owner[keep]
-    count = np.bincount(owner, minlength=len(sessions)).astype(np.int32)
-    offset = np.zeros(len(sessions), np.int64)
-    offset[1:] = np.cumsum(count)[:-1]
-    np.save(out / "para_keys.npy", pvec.astype(np.float16))
-    np.savez(out / "para_index.npz", offset=offset, count=count)
+    paraphrase_texts, owners = key_set.session_paraphrases(sessions, paraphrases)
+    paraphrase_vectors, paraphrase_tokens = embed_each(client, args, paraphrase_texts, output_dir / "raw_para")
+    similarities = key_set.drift_similarities(paraphrase_vectors, owners, keys)
+    threshold = key_set.threshold_keeping(similarities, args.para_keep_frac)
+    paraphrase_stats = key_set.write_paraphrase_keys(
+        output_dir, paraphrase_vectors, owners, similarities, threshold, len(sessions)
+    )
+    link_typed_text_vectors(output_dir)
 
-    link = out / "text_vecs.npy"                                        # input features: Qwen3-0.6B, unchanged
+    api_tokens = instruction_tokens + paraphrase_tokens
+    usd_per_million_tokens = USD_PER_MILLION_TOKENS.get(args.model, DEFAULT_USD_PER_MILLION_TOKENS)
+    meta = {
+        "model": args.model,
+        "paraphrases": str(PARAPHRASES_PATH),
+        "dim": int(keys.shape[1]),
+        "label_source": "openai",
+        "input_text_vecs": "Qwen3-0.6B",
+        **paraphrase_stats,
+        "api_tokens": int(api_tokens),
+        "approx_cost_usd": round(api_tokens / 1e6 * usd_per_million_tokens, 2),
+    }
+    with open(output_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=1)
+    print(json.dumps(meta, indent=1), flush=True)
+
+    report_text_key_oracle(sessions, [("qwen3-0.6B", np.load(paths.SHARED / "keys.npy")), (args.model, keys)])
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="text-embedding-3-large")
+    parser.add_argument("--out", dest="output_dir", default=str(paths.DATA / "keys_openai"))
+    parser.add_argument(
+        "--para_keep_frac",
+        type=float,
+        default=0.927,
+        help="drift filter: keep this fraction of paraphrases (same fraction as the Qwen 0.6B key set)",
+    )
+    parser.add_argument("--batch", type=int, default=256, help="inputs per API request")
+    parser.add_argument("--workers", type=int, default=6)
+    return parser.parse_args()
+
+
+def embed_each(client, args: argparse.Namespace, texts: list[str], cache_prefix: Path) -> tuple[np.ndarray, int]:
+    """One embedding row per text (each distinct text is sent once) and the API tokens spent."""
+    unique_texts, positions = key_set.deduplicate(texts)
+    vectors, api_tokens = embed_cached(client, args.model, unique_texts, args.batch, args.workers, cache_prefix)
+    return vectors[positions], api_tokens
+
+
+def embed_cached(
+    client, model: str, texts: list[str], batch_size: int, workers: int, cache_prefix: Path
+) -> tuple[np.ndarray, int]:
+    """L2-normalized embeddings of texts and the API tokens spent.
+
+    <cache_prefix>.npy / .json hold the vectors and their texts; they are reused (0 tokens) if the texts match."""
+    vectors_path, texts_path = Path(f"{cache_prefix}.npy"), Path(f"{cache_prefix}.json")
+    if vectors_path.exists() and texts_path.exists() and json.loads(texts_path.read_text()) == texts:
+        print(f"cached: {vectors_path}", flush=True)
+        return np.load(vectors_path), 0
+    chunks = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
+
+    def embed_chunk(chunk: list[str]) -> tuple[np.ndarray, int]:
+        # the API rejects empty strings
+        inputs = [text[:MAX_INPUT_CHARACTERS] if text.strip() else "." for text in chunk]
+        response = client.embeddings.create(model=model, input=inputs)
+        in_input_order = sorted(response.data, key=lambda item: item.index)
+        return np.array([item.embedding for item in in_input_order], np.float32), response.usage.total_tokens
+
+    chunk_vectors, api_tokens, start_time = [], 0, time.time()
+    with ThreadPoolExecutor(workers) as executor:
+        for vectors, tokens in executor.map(embed_chunk, chunks):
+            chunk_vectors.append(vectors)
+            api_tokens += tokens
+            if len(chunk_vectors) % 50 == 0 or len(chunk_vectors) == len(chunks):
+                print(
+                    f"  {len(chunk_vectors)}/{len(chunks)} requests  {api_tokens / 1e6:.2f}M tokens  "
+                    f"{time.time() - start_time:.0f}s",
+                    flush=True,
+                )
+    vectors = np.concatenate(chunk_vectors)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    np.save(vectors_path, vectors)
+    texts_path.write_text(json.dumps(texts))
+    return vectors, api_tokens
+
+
+def link_typed_text_vectors(output_dir: Path) -> None:
+    """Typed-text vectors are model inputs, not labels: every key set uses the default set's text_vecs.npy."""
+    link = output_dir / "text_vecs.npy"
     if link.is_symlink() or link.exists():
         link.unlink()
     link.symlink_to(paths.SHARED / "text_vecs.npy")
 
-    tokens = tok_i + tok_p
-    meta = {"model": args.model, "paraphrases": str(paths.SHARED / "paraphrases.json"), "dim": int(keys.shape[1]), "label_source": "openai", "input_text_vecs": "Qwen3-0.6B",
-            "theta_para": theta, "para_total": int(len(sims)), "para_kept": int(keep.sum()),
-            "para_sim_quantiles": {q: float(np.quantile(sims, q)) for q in (0.05, 0.25, 0.5, 0.75, 0.95)},
-            "sessions_with_paraphrase": int((count > 0).sum()), "api_tokens": int(tokens),
-            "approx_cost_usd": round(tokens / 1e6 * PRICE_PER_MTOK.get(args.model, 0.13), 2)}
-    json.dump(meta, open(out / "meta.json", "w"), indent=1)
-    print(json.dumps(meta, indent=1), flush=True)
 
-    # how well does each key space alone rank the trace-judged same-workflow pairs? (text-key oracle)
+def report_text_key_oracle(sessions: list[dict], key_sets: list[tuple[str, np.ndarray]]) -> None:
+    """Prints how well each key space alone ranks the judged same-workflow pairs of val and test."""
     import torch
+
     from ..metrics import judged_retrieval, load_judged
-    gmap = {g: i for i, g in enumerate(sorted({s["group"] for s in sessions}))}
-    group = np.array([gmap[s["group"]] for s in sessions])
-    split = np.array([s["split"] for s in sessions])
-    for name, K in (("qwen3-0.6B", np.load(paths.SHARED / "keys.npy")), (args.model, keys)):
-        for sp in ("val", "test"):
-            sidx = np.nonzero(split == sp)[0]
-            rel = load_judged(paths.SHARED / f"judged_{sp}.jsonl", sidx, group[sidx])
-            if rel is not None:
-                m = judged_retrieval(torch.from_numpy(K[sidx].astype(np.float32)), rel)
-                print(f"text-key oracle  {name:24s} {sp}:", {k: round(v, 4) for k, v in m.items()}, flush=True)
+
+    group_ids = {group: i for i, group in enumerate(sorted({session["group"] for session in sessions}))}
+    groups = np.array([group_ids[session["group"]] for session in sessions])
+    splits = np.array([session["split"] for session in sessions])
+    for name, keys in key_sets:
+        for split in ("val", "test"):
+            session_indices = np.nonzero(splits == split)[0]
+            relevance = load_judged(paths.SHARED / f"judged_{split}.jsonl", session_indices, groups[session_indices])
+            if relevance is not None:
+                metrics = judged_retrieval(torch.from_numpy(keys[session_indices].astype(np.float32)), relevance)
+                print(
+                    f"text-key oracle  {name:24s} {split}:",
+                    {metric: round(value, 4) for metric, value in metrics.items()},
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

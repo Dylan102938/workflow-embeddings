@@ -1,14 +1,8 @@
-"""The training objective and every tracked metric (definitions: docs/EXPERIMENTS.md).
+"""The training objective and every tracked metric. Definitions: docs/EXPERIMENTS.md.
 
-Shapes: B sessions, T steps, N candidate keys, D label dimension. d [B, T, D] unit directions, kappa [B, T, 1]
-confidences, valid [B, T] step mask, target [B] each session's own column among the candidates. A session's workflow
-embedding is its direction at its last step (terminal()). Distances are cosine distances 1 - cos.
-
-Objective:  false_negative_mask, logits, smooth_targets, hard_negative_bias, info_nce
-Training:   loss (info_nce with smoothing + hard negatives), rigid_loss (info_nce one-hot), avg_dist
-Evaluation: info_nce (loss), target_rank -> recall_at_k (r@k), log_dist_knn (avg_log_dist_100NN),
-            load_judged + judged_retrieval (judged_r@k, judged_ndcg@10)
+Shapes: B sessions, T steps, N candidate keys, D label dimension. Distances are cosine distances.
 """
+
 from __future__ import annotations
 
 import collections
@@ -20,142 +14,180 @@ import torch
 import torch.nn.functional as F
 
 
-# --------------------------------------------------------------------------------------------------------- objective
-def false_negative_mask(U, cand_group, target_key, target_group, target, theta: float) -> torch.Tensor:
-    """[B, N] True where a candidate must not count as a negative: the same instruction group as the target, or a
-    near-duplicate intent, cos(target key, candidate) > theta. The target column itself is never masked."""
-    m = (target_group[:, None] == cand_group[None, :]) | (target_key @ U.T > theta)
-    m[torch.arange(len(target), device=U.device), target] = False
-    return m
+# ---------------------------------------------------------------------------------------------------- objective
+def false_negative_mask(
+    keys: torch.Tensor, groups: torch.Tensor, targets: torch.Tensor, duplicate_threshold: float
+) -> torch.Tensor:
+    """[B, N], True where a candidate must not count as a negative for the session.
+
+    That is: it has the target's instruction group, or its key is closer to the target's than the threshold.
+    The target itself is never masked.
+    """
+    same_group = groups[targets][:, None] == groups[None, :]
+    near_duplicate = keys[targets] @ keys.T > duplicate_threshold
+    mask = same_group | near_duplicate
+    mask[torch.arange(len(targets), device=keys.device), targets] = False
+    return mask
 
 
-def logits(d, kappa, U, fn_mask) -> torch.Tensor:
-    """[B, T, N] fp32: kappa_t * cos(d_t, U_j); masked candidates -inf."""
-    out = kappa.float() * torch.einsum("btd,nd->btn", d.float(), U.float())
-    return out.masked_fill(fn_mask[:, None, :], float("-inf"))
+def candidate_logits(
+    directions: torch.Tensor, confidences: torch.Tensor, keys: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
+    """[B, T, N] float32: confidence * cos(direction, key), with masked candidates at -inf."""
+    similarities = torch.einsum("btd,nd->btn", directions.float(), keys.float())
+    return (confidences.float() * similarities).masked_fill(mask[:, None, :], float("-inf"))
 
 
-def smooth_targets(U, target_key, target, fn_mask, eps: float, tau: float) -> torch.Tensor:
-    """[B, N] (1 - eps) * one-hot(target) + eps * softmax(cos(target key, U) / tau) over the unmasked candidates other
-    than the target itself (its self-similarity would otherwise absorb the smoothing mass)."""
-    rows = torch.arange(len(target), device=U.device)
-    sims = (target_key @ U.T / tau).masked_fill(fn_mask, float("-inf"))
-    sims[rows, target] = float("-inf")
-    q = eps * sims.softmax(-1)
-    q[rows, target] += 1.0 - eps
-    return q
+def smoothed_targets(
+    keys: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, smoothing: float, temperature: float
+) -> torch.Tensor:
+    """[B, N]: 1 - smoothing on the target, the rest spread over the other unmasked candidates by key similarity."""
+    rows = torch.arange(len(targets), device=keys.device)
+    similarities = (keys[targets] @ keys.T / temperature).masked_fill(mask, float("-inf"))
+    similarities[rows, targets] = float("-inf")
+    distribution = smoothing * similarities.softmax(-1)
+    distribution[rows, targets] += 1.0 - smoothing
+    return distribution
 
 
-def hard_negative_bias(U, target_key, target, fn_mask, beta: float) -> torch.Tensor:
-    """[B, N] additive logit bias weighting each negative j by w_j = exp(beta * cos(target key, U_j)), normalized so a
-    row's negative weights average 1 (Robinson et al. 2021, hardness measured in the label space). Target column: 0."""
-    rows = torch.arange(len(target), device=U.device)
-    s = beta * (target_key @ U.T)
-    neg = ~fn_mask
-    neg[rows, target] = False
-    lme = torch.logsumexp(s.masked_fill(~neg, float("-inf")), -1, keepdim=True) - neg.sum(-1, keepdim=True).log()
-    return (s - lme).masked_fill(~neg, 0.0)
+def hard_negative_bias(keys: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, beta: float) -> torch.Tensor:
+    """[B, N] logit bias that weights negative j by exp(beta * cos(target key, key j)), normalized to mean 1."""
+    rows = torch.arange(len(targets), device=keys.device)
+    is_negative = ~mask
+    is_negative[rows, targets] = False
+    scores = beta * (keys[targets] @ keys.T)
+    log_mean_weight = (
+        torch.logsumexp(scores.masked_fill(~is_negative, float("-inf")), -1, keepdim=True)
+        - is_negative.sum(-1, keepdim=True).log()
+    )
+    return (scores - log_mean_weight).masked_fill(~is_negative, 0.0)
 
 
-def info_nce(lg, target, valid, soft_targets=None, fn_mask=None):
-    """Per-step InfoNCE. lg [B, T, N] logits, valid [B, T]. soft_targets [B, N] (training label smoothing; needs
-    fn_mask) replace the one-hot target. Returns (mean over sessions of the mean over their valid steps, ce [B, T])."""
-    B, T, N = lg.shape
+def info_nce(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    valid: torch.Tensor,
+    soft_targets: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
+):
+    """Cross-entropy of every step, averaged over each session's valid steps, then over sessions.
+
+    soft_targets [B, N] replace the one-hot targets (and need the false-negative mask). Returns the loss and the
+    per-step cross-entropy [B, T].
+    """
+    batch_size, n_steps, n_candidates = logits.shape
     if soft_targets is None:
-        ce = F.cross_entropy(lg.reshape(B * T, N), target.repeat_interleave(T), reduction="none").view(B, T)
+        per_step = F.cross_entropy(
+            logits.reshape(-1, n_candidates), targets.repeat_interleave(n_steps), reduction="none"
+        ).view(batch_size, n_steps)
     else:
-        logp = lg.log_softmax(-1).masked_fill(fn_mask[:, None, :], 0.0)     # masked columns have q = 0
-        ce = -(soft_targets[:, None, :] * logp).sum(-1)
-
+        log_probabilities = logits.log_softmax(-1).masked_fill(mask[:, None, :], 0.0)
+        per_step = -(soft_targets[:, None, :] * log_probabilities).sum(-1)
     valid = valid.float()
-    ce = ce * valid
-    return (ce.sum(1) / valid.sum(1)).mean(), ce
+    per_step = per_step * valid
+    return (per_step.sum(1) / valid.sum(1)).mean(), per_step
 
 
 # ---------------------------------------------------------------------------------------------- embedding metrics
-def terminal(x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-    """[B, T, ...] -> [B, ...] at each session's last (valid) step."""
-    return x[torch.arange(len(lengths), device=x.device), lengths.to(x.device) - 1]
+def at_last_step(values: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+    """[B, T, ...] -> [B, ...]: each session's value at its last valid step."""
+    return values[torch.arange(len(lengths), device=values.device), lengths.to(values.device) - 1]
 
 
-def avg_dist(e, label_keys, label_group) -> torch.Tensor:
-    """Mean distance between each session's workflow embedding e [B, D] and the label keys [B, D] of the other sessions
-    in the batch, excluding its own label (its key and those of sessions with the same instruction group)."""
-    dist = 1.0 - F.normalize(e.float(), dim=-1) @ label_keys.float().T          # [B, B]
-    other = label_group[:, None] != label_group[None, :]
-    return (dist * other).sum() / other.sum().clamp(min=1)
+def avg_dist(embeddings: torch.Tensor, label_keys: torch.Tensor, label_groups: torch.Tensor) -> torch.Tensor:
+    """Mean distance from each session's embedding to the labels of the other sessions in the batch.
+
+    Sessions with the same instruction group share a label and are excluded.
+    """
+    distances = 1.0 - F.normalize(embeddings.float(), dim=-1) @ label_keys.float().T
+    is_other = label_groups[:, None] != label_groups[None, :]
+    return (distances * is_other).sum() / is_other.sum().clamp(min=1)
 
 
-def target_rank(lg_last, target) -> torch.Tensor:
-    """[B] rank of the target among the unmasked candidates (1 = first), lg_last [B, N] logits at the last step."""
-    true = lg_last.gather(1, target[:, None])
-    return (lg_last > true).sum(1) + 1
+def target_ranks(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """[B] rank of each target among the unmasked candidates (1 = best), from logits [B, N]."""
+    target_logits = logits.gather(1, targets[:, None])
+    return (logits > target_logits).sum(1) + 1
 
 
 def recall_at_k(ranks: torch.Tensor, k: int) -> float:
     return float((ranks <= k).float().mean())
 
 
-def log_dist_knn(e, U_ref, ref_group, target_group, k: int = 100, chunk: int = 256) -> torch.Tensor:
-    """[S] for each workflow embedding e [S, D]: the k candidates of U_ref [N, D] nearest to it, minus its own label
-    (candidates of the target's instruction group) if among them; the mean log distance to the rest."""
-    out = []
-    for s in range(0, len(e), chunk):
-        es = F.normalize(e[s:s + chunk].float(), dim=-1)
-        sims, idx = (es @ U_ref.float().T).topk(min(k, len(U_ref)), dim=1)        # [c, k]
-        keep = ref_group[idx] != target_group[s:s + chunk, None]
-        logd = torch.log((1.0 - sims).clamp(min=1e-6))
-        out.append((logd * keep).sum(1) / keep.sum(1).clamp(min=1))
-    return torch.cat(out)
+def avg_log_dist_knn(
+    embeddings: torch.Tensor,
+    keys: torch.Tensor,
+    groups: torch.Tensor,
+    target_groups: torch.Tensor,
+    n_neighbors: int = 100,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """[S] mean log distance from each embedding to its nearest candidate keys, its own label excluded."""
+    results = []
+    for start in range(0, len(embeddings), chunk_size):
+        chunk = F.normalize(embeddings[start : start + chunk_size].float(), dim=-1)
+        similarities, neighbors = (chunk @ keys.float().T).topk(min(n_neighbors, len(keys)), dim=1)
+        is_other = groups[neighbors] != target_groups[start : start + chunk_size, None]
+        log_distances = torch.log((1.0 - similarities).clamp(min=1e-6))
+        results.append((log_distances * is_other).sum(1) / is_other.sum(1).clamp(min=1))
+    return torch.cat(results)
 
 
-# ------------------------------------------------------------------------------------------- judged retrieval
-def load_judged(path: Path, sidx: np.ndarray, groups: np.ndarray):
-    """Graded relevance between the sessions of a split, keyed by position in sidx: LLM-judged pairs (0/1/2, from
-    prep/judge_pool.py) plus duplicate-instruction groups (gain 2). None if the split has no judgments."""
+# ----------------------------------------------------------------------------------------------- judged retrieval
+SAME_WORKFLOW = 2  # relevance grades: 2 = same workflow, 1 = related, 0 = different
+
+
+def load_judged(path: Path, session_indices: np.ndarray, groups: np.ndarray) -> dict | None:
+    """Graded relevance {query position: {other position: grade}} among the given sessions.
+
+    Combines the LLM-judged pairs in `path` with duplicate-instruction groups (grade 2). None without the file.
+    """
     if not Path(path).exists():
         return None
-    pos = {int(s): i for i, s in enumerate(sidx)}
-    rel = collections.defaultdict(dict)
+    position = {int(session): index for index, session in enumerate(session_indices)}
+    relevance = collections.defaultdict(dict)
     for line in open(path):
-        r = json.loads(line)
-        a, b = pos.get(r["a"]), pos.get(r["b"])
-        if a is None or b is None:
+        pair = json.loads(line)
+        first, second = position.get(pair["a"]), position.get(pair["b"])
+        if first is None or second is None:
             continue
-        g = int(r["label"])
-        rel[a][b] = max(rel[a].get(b, 0), g)
-        rel[b][a] = max(rel[b].get(a, 0), g)
+        grade = int(pair["label"])
+        relevance[first][second] = max(relevance[first].get(second, 0), grade)
+        relevance[second][first] = max(relevance[second].get(first, 0), grade)
     members = collections.defaultdict(list)
-    for i, g in enumerate(np.asarray(groups).tolist()):
-        members[g].append(i)
-    for ms in members.values():
-        for a in ms:
-            for b in ms:
-                if a != b:
-                    rel[a][b] = 2
-    return rel
+    for index, group in enumerate(np.asarray(groups).tolist()):
+        members[group].append(index)
+    for group_members in members.values():
+        for first in group_members:
+            for second in group_members:
+                if first != second:
+                    relevance[first][second] = SAME_WORKFLOW
+    return relevance
 
 
-def judged_retrieval(E: torch.Tensor, rel, k: int = 10) -> dict:
-    """Session-to-session retrieval across apps (the query's own app is not excluded) with pooled judged relevance
-    (unjudged = 0). r@1 / r@5 over queries with a 'same workflow' (gain 2) partner; nDCG@k (gains 2^g - 1) over
-    queries with any positive gain."""
-    E = F.normalize(E.float(), dim=-1)
-    S = E @ E.T
-    S.fill_diagonal_(-float("inf"))
-    r1, r5, ndcg = [], [], []
-    disc = 1.0 / np.log2(np.arange(2, k + 2))
-    for q, cands in rel.items():
-        if not any(g > 0 for g in cands.values()):
+def judged_retrieval(embeddings: torch.Tensor, relevance: dict, k: int = 10) -> dict:
+    """Session-to-session retrieval scored with pooled judged relevance (unjudged pairs count as 0)."""
+    embeddings = F.normalize(embeddings.float(), dim=-1)
+    similarities = embeddings @ embeddings.T
+    similarities.fill_diagonal_(-float("inf"))
+    discounts = 1.0 / np.log2(np.arange(2, k + 2))
+    hits_at_1, hits_at_5, ndcgs = [], [], []
+    for query, grades in relevance.items():
+        if not any(grade > 0 for grade in grades.values()):
             continue
-        order = S[q].argsort(descending=True).tolist()
-        gains = np.array([cands.get(j, 0) for j in order[:k]], float)
-        ideal = np.sort(np.array(list(cands.values()), float))[::-1][:k]
-        ndcg.append(((2 ** gains - 1) * disc[:len(gains)]).sum() / ((2 ** ideal - 1) * disc[:len(ideal)]).sum())
-        if any(g == 2 for g in cands.values()):
-            rank = next(i for i, j in enumerate(order) if cands.get(j, 0) == 2) + 1
-            r1.append(rank <= 1)
-            r5.append(rank <= 5)
-    return {"judged_r@1": float(np.mean(r1)) if r1 else float("nan"),
-            "judged_r@5": float(np.mean(r5)) if r5 else float("nan"),
-            f"judged_ndcg@{k}": float(np.mean(ndcg)) if ndcg else float("nan")}
+        ranking = similarities[query].argsort(descending=True).tolist()
+        gains = np.array([grades.get(candidate, 0) for candidate in ranking[:k]], float)
+        ideal = np.sort(np.array(list(grades.values()), float))[::-1][:k]
+        dcg = ((2**gains - 1) * discounts[: len(gains)]).sum()
+        ndcgs.append(dcg / ((2**ideal - 1) * discounts[: len(ideal)]).sum())
+        if SAME_WORKFLOW in grades.values():
+            rank = (
+                next(index for index, candidate in enumerate(ranking) if grades.get(candidate, 0) == SAME_WORKFLOW) + 1
+            )
+            hits_at_1.append(rank <= 1)
+            hits_at_5.append(rank <= 5)
+
+    def mean(values):
+        return float(np.mean(values)) if values else float("nan")
+
+    return {"judged_r@1": mean(hits_at_1), "judged_r@5": mean(hits_at_5), f"judged_ndcg@{k}": mean(ndcgs)}

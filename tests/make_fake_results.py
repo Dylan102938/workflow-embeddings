@@ -9,6 +9,7 @@ days old), and one imported legacy run (meta.legacy, steps.jsonl every 50 steps,
 *_avg_log_dist_100NN). Curves: training loss ~9 -> ~3 with noise, val_loss with its minimum around step 6000.
 Standard library only.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,8 +22,19 @@ import time
 from pathlib import Path
 
 VARS = [  # key, default (docs/EXPERIMENTS.md order)
-    ("arch", "late-history-transf"), ("dm", 512), ("dh", 64), ("nl", 4), ("nh", 8), ("drop", 0.3), ("smooth", 0.2),
-    ("patch", 576), ("lr", 5e-4), ("bs", 64), ("ep", 45), ("beta", 0), ("seed", 0),
+    ("arch", "late-history-transf"),
+    ("dm", 512),
+    ("dh", 64),
+    ("nl", 4),
+    ("nh", 8),
+    ("drop", 0.3),
+    ("smooth", 0.2),
+    ("patch", 576),
+    ("lr", 5e-4),
+    ("bs", 64),
+    ("ep", 45),
+    ("beta", 0),
+    ("seed", 0),
 ]
 
 
@@ -43,10 +55,14 @@ def run_id(exp: dict) -> str:
 
 # Runs: overrides of the defaults, plus how good the config is (lower = better final loss) and what state it is in.
 RUNS = [
-    ({}, 0.00, "done"), ({"seed": 1}, 0.00, "done"), ({"seed": 2}, 0.00, "done"),
-    ({"arch": "transf"}, 0.12, "done"), ({"arch": "transf", "seed": 1}, 0.12, "done"),
+    ({}, 0.00, "done"),
+    ({"seed": 1}, 0.00, "done"),
+    ({"seed": 2}, 0.00, "done"),
+    ({"arch": "transf"}, 0.12, "done"),
+    ({"arch": "transf", "seed": 1}, 0.12, "done"),
     ({"arch": "gru"}, 0.35, "done"),
-    ({"dm": 384}, 0.08, "done"), ({"dm": 384, "seed": 1}, 0.08, "done"),
+    ({"dm": 384}, 0.08, "done"),
+    ({"dm": 384, "seed": 1}, 0.08, "done"),
     ({"drop": 0.1}, 0.20, "done"),
     ({"nl": 6}, 0.04, "done"),
     ({"beta": 2}, -0.03, "running"),
@@ -66,29 +82,47 @@ def curves(rng: random.Random, total: int, offset: float, beta: float, lr_peak: 
         base = 3.0 + offset + 6.0 * math.exp(-s / 2200) + 0.4 * math.exp(-s / 9000)
         loss = base + rng.gauss(0, 0.32) * (0.6 + 0.4 * math.exp(-s / 4000))
         if rng.random() < 0.002:
-            loss += rng.uniform(0.5, 2.0)                          # occasional spikes
+            loss += rng.uniform(0.5, 2.0)  # occasional spikes
         rigid = loss * 0.93 + rng.gauss(0, 0.05)
         avg_dist = 0.98 - 0.25 * math.exp(-s / 3000) + rng.gauss(0, 0.012)
         step_s = abs(rng.gauss(0.21, 0.03))
         data_s = abs(rng.gauss(0.02, 0.01))
         t += step_s + data_s
         b = beta * min(1.0, s / (0.3 * total))
-        steps.append({"step": s, "epoch": (s - 1) // spe, "time": round(t, 2), "loss": loss, "rigid_loss": rigid,
-                      "avg_dist": avg_dist, "lr": lr, "grad_norm": abs(rng.gauss(1.2 * math.exp(-s / 5000) + 0.35, 0.12)),
-                      "beta": b, "data_s": data_s, "step_s": step_s})
+        steps.append(
+            {
+                "step": s,
+                "epoch": (s - 1) // spe,
+                "time": round(t, 2),
+                "loss": loss,
+                "rigid_loss": rigid,
+                "avg_dist": avg_dist,
+                "lr": lr,
+                "grad_norm": abs(rng.gauss(1.2 * math.exp(-s / 5000) + 0.35, 0.12)),
+                "beta": b,
+                "data_s": data_s,
+                "step_s": step_s,
+            }
+        )
         if s % 250 == 0 or s == total:
             over = 0.02 * max(0.0, (s - 5200) / 1000) ** 2
             vl = 4.1 + offset + 4.6 * math.exp(-s / 1500) + over + rng.gauss(0, 0.015)
-            q = max(0.0, min(1.0, 1.0 - (vl - 3.6) / 6.0))       # 1 = good
-            evals.append({
-                "step": s, "epoch": (s - 1) // spe, "time": round(t + 40, 2), "val_loss": vl,
-                "val_r@1": 0.62 * q ** 2 + rng.gauss(0, 0.006), "val_r@5": 0.86 * q ** 1.3 + rng.gauss(0, 0.006),
-                "val_avg_log_dist_100NN": -0.55 - 0.5 * q + rng.gauss(0, 0.004),
-                "val_judged_r@1": 0.41 * q ** 1.5 + rng.gauss(0, 0.006),
-                "val_judged_r@5": 0.70 * q ** 1.2 + rng.gauss(0, 0.006),
-                "val_judged_ndcg@10": 0.55 * q + rng.gauss(0, 0.006),
-                "max_mem_gb": round(31.5 + rng.random(), 2),
-            })
+            q = max(0.0, min(1.0, 1.0 - (vl - 3.6) / 6.0))  # 1 = good
+            evals.append(
+                {
+                    "step": s,
+                    "epoch": (s - 1) // spe,
+                    "time": round(t + 40, 2),
+                    "val_loss": vl,
+                    "val_r@1": 0.62 * q**2 + rng.gauss(0, 0.006),
+                    "val_r@5": 0.86 * q**1.3 + rng.gauss(0, 0.006),
+                    "val_avg_log_dist_100NN": -0.55 - 0.5 * q + rng.gauss(0, 0.004),
+                    "val_judged_r@1": 0.41 * q**1.5 + rng.gauss(0, 0.006),
+                    "val_judged_r@5": 0.70 * q**1.2 + rng.gauss(0, 0.006),
+                    "val_judged_ndcg@10": 0.55 * q + rng.gauss(0, 0.006),
+                    "max_mem_gb": round(31.5 + rng.random(), 2),
+                }
+            )
             t += 40
     return steps, evals
 
@@ -134,23 +168,53 @@ def main():
             steps = steps[:4120]
             evals = [e for e in evals if e["step"] <= 4120]
         if legacy:
-            steps = [{k: v for k, v in r.items() if k not in ("rigid_loss", "avg_dist")} for r in steps if r["step"] % 50 == 0]
+            steps = [
+                {k: v for k, v in r.items() if k not in ("rigid_loss", "avg_dist")}
+                for r in steps
+                if r["step"] % 50 == 0
+            ]
             evals = [{k: v for k, v in r.items() if "avg_log_dist" not in k} for r in evals]
-        meta = {"git_commit": "abd7a6a", "git_dirty": False, "host": "rnn-a100-3" if exp["seed"] != 2 else "baseten",
-                "launcher": "fake",
-                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now - 4 * 3600)),
-                "n_params": 21_345_792 if exp["dm"] == 512 else 12_402_304, "steps_per_epoch": spe, "total_steps": total}
+        meta = {
+            "git_commit": "abd7a6a",
+            "git_dirty": False,
+            "host": "rnn-a100-3" if exp["seed"] != 2 else "baseten",
+            "launcher": "fake",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now - 4 * 3600)),
+            "n_params": 21_345_792 if exp["dm"] == 512 else 12_402_304,
+            "steps_per_epoch": spe,
+            "total_steps": total,
+        }
         if legacy:
             meta |= {"legacy": True, "legacy_name": "r20_xf4_d384_p01"}
         cfg = {
-            "id": rid, "experiment": exp,
-            "train": {"warmup_steps": 500, "weight_decay": 0.05, "ema": 0.999, "max_frames": 4096 if exp["patch"] == 576 else 8192,
-                      "eval_steps": 250, "grad_clip": 1.0, "amp": "bf16", "checkpointing": True},
+            "id": rid,
+            "experiment": exp,
+            "train": {
+                "warmup_steps": 500,
+                "weight_decay": 0.05,
+                "ema": 0.999,
+                "max_frames": 4096 if exp["patch"] == 576 else 8192,
+                "eval_steps": 250,
+                "grad_clip": 1.0,
+                "amp": "bf16",
+                "checkpointing": True,
+            },
             "eval": {"dupmask": 0.8, "judged": "keys/judged_val.jsonl", "batch_sessions": 128},
-            "data": {"root": "/nas/ucb/dfeng/data/workflow-embeddings", "keys": "keys_openai", "frames": "",
-                     "prefetch_threads": 4, "prefetch_depth": 4},
-            "model": {"d_model": exp["dm"], "n_layers": exp["nl"], "n_heads": exp["nh"], "d_head": exp["dh"],
-                      "dropout": exp["drop"], "d_key": 3072},
+            "data": {
+                "root": "/nas/ucb/dfeng/data/workflow-embeddings",
+                "keys": "keys_openai",
+                "frames": "",
+                "prefetch_threads": 4,
+                "prefetch_depth": 4,
+            },
+            "model": {
+                "d_model": exp["dm"],
+                "n_layers": exp["nl"],
+                "n_heads": exp["nh"],
+                "d_head": exp["dh"],
+                "dropout": exp["drop"],
+                "d_key": 3072,
+            },
             "meta": meta,
         }
         (d / "config.json").write_text(json.dumps(cfg, indent=2))
@@ -175,19 +239,29 @@ def main():
     # a queue: done, running, stale and never-started ids, overrides, comments, one malformed line
     jobs = out / "jobs.txt"
     default = {k: v for k, v in VARS}
-    todo = [run_id(default | {"arch": "gru", "seed": 1}), run_id(default | {"nl": 8}), run_id(default | {"bs": 128}),
-            run_id(default | {"dh": 128, "nh": 4})]
+    todo = [
+        run_id(default | {"arch": "gru", "seed": 1}),
+        run_id(default | {"nl": 8}),
+        run_id(default | {"bs": 128}),
+        run_id(default | {"dh": 128, "nh": 4}),
+    ]
     jobs.write_text(
         "# Run queue (fake).\n\n[r26]\n# Round 26 (fake): architecture and depth.\n"
         "# Same recipe as the best model; 24x24 SigLIP2 frames.\n\n"
-        + "\n".join(ids[:6]) + "\n"
-        + ids[9] + "   # depth 6\n"
-        + todo[3] + " train.max_frames=2048\n"
-        + todo[0] + "\n"
+        + "\n".join(ids[:6])
+        + "\n"
+        + ids[9]
+        + "   # depth 6\n"
+        + todo[3]
+        + " train.max_frames=2048\n"
+        + todo[0]
+        + "\n"
         + "\n# hard negatives\n"
-        + ids[10] + " train.max_frames=2048 train.eval_steps=500\n"
+        + ids[10]
+        + " train.max_frames=2048 train.eval_steps=500\n"
         + "\n[r27]\n# Round 27 (fake): width and depth ablations.\n"
-        + "\n".join([ids[6], ids[7], ids[8], ids[11], todo[1], todo[2]]) + "\n"
+        + "\n".join([ids[6], ids[7], ids[8], ids[11], todo[1], todo[2]])
+        + "\n"
         + "arch-gru_dm-512_foo-1_seed-0   # malformed: unknown variable\n"
     )
     print(f"wrote {len(ids)} runs to {root} and a 2-section queue to {jobs}")

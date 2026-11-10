@@ -1,22 +1,20 @@
-"""Frozen screen-feature cache (offline, GPU; one shard per job / array task).
+"""Frozen screen-feature cache: SigLIP2 patch features of every screenshot, pooled to a grid and PCA-projected.
 
-Every step's screenshot (global step order from prepare.py) is encoded with SigLIP2 so400m (NaFlex: aspect ratio
-kept, <= --global_patches patches), its patch grid adaptive-average-pooled to --grid x --grid tokens, and every token
-projected with a channel PCA (1152 -> --pca_dim) fit on training frames. Stored as exact bf16 (uint16 bits) in
-BULK/frames_dense (grid 16) or BULK/frames_dense_g<grid>: global_<shard>.npy [rows, grid^2, pca_dim] +
-meta_<shard>.json. Training reads it with storage/frames.py; patch (experiment variable) = grid^2.
-
-  python -m wfemb.prep.cache_frames --mode pca_fit --grid 24                    # once, before the shards
+  python -m wfemb.prep.cache_frames --mode pca_fit --grid 24                     # once per grid, before the shards
   python -m wfemb.prep.cache_frames --mode dense --grid 24 --shard 0 --num_shards 8
+
+File formats: docs/DATA_PREP.md.
 """
+
 from __future__ import annotations
 
 import argparse
 import io
 import json
 import os
-import pickle
 import time
+from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -24,176 +22,288 @@ import torch.nn.functional as F
 from PIL import Image
 
 from ..storage import paths
+from .prepare import load_sessions
 from .splitzip import SplitZip
 
-Image.MAX_IMAGE_PIXELS = None
+Image.MAX_IMAGE_PIXELS = None  # large screenshots would otherwise trip PIL's decompression-bomb check
 ENCODER = "google/siglip2-so400m-patch16-naflex"
+DEFAULT_GRID = 16
+PLACEHOLDER_IMAGE_SIZE = (1280, 720)
+PCA_REPORT_DIMS = (64, 128, 256, 384, 512, 768)
+
+Batch = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
-class FrameDataset(torch.utils.data.Dataset):
-    """Screenshots read from the AgentNet archives in place, preprocessed for SigLIP2 NaFlex."""
-
-    def __init__(self, items, encoder, global_patches):
-        self.items, self.encoder, self.gp = items, encoder, global_patches
-        self.zips = None
-
-    def _open(self):
-        from transformers import AutoImageProcessor
-        self.proc = AutoImageProcessor.from_pretrained(self.encoder)
-        self.zips, self.index = {}, {}
-        for src, zp in paths.ZIPS.items():
-            z = SplitZip(zp)
-            self.zips[src] = z
-            self.index[src] = z.basename_index()
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, i):
-        if self.zips is None:
-            self._open()
-        gi, src, name = self.items[i][:3]
-        try:
-            member = self.index[src].get(name)
-            img = None if member is None else Image.open(io.BytesIO(self.zips[src].read(member))).convert("RGB")
-        except Exception:
-            img = None
-        ok = img is not None
-        if not ok:
-            img = Image.new("RGB", (1280, 720))
-        g = self.proc(images=[img], max_num_patches=self.gp, return_tensors="pt")
-        return gi, ok, g["pixel_values"][0], g["pixel_attention_mask"][0], g["spatial_shapes"][0]
+class Frame(NamedTuple):
+    step: int  # global step index: row of events.npz and of the concatenated cache shards
+    source: str
+    image: str
+    split: str
 
 
-def collate(batch):
-    gi, ok, pv, pm, ps = zip(*batch)
-    return torch.tensor(gi), torch.tensor(ok), torch.stack(pv), torch.stack(pm), torch.stack(ps)
+def main() -> None:
+    args = parse_arguments()
+    output_dir = cache_dir(args.grid)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frames = all_frames(load_sessions())
+    encoder = ScreenEncoder(args)
+    if args.mode == "pca_fit":
+        fit_pca(encoder, frames, args)
+    else:
+        write_shard(encoder, frames, args, output_dir)
 
 
-def pool_grid(hid, shapes, out_hw):
-    """SigLIP2 patch outputs [B, n, D] with spatial shapes [B, 2] -> [B, out_h * out_w, D] (adaptive average)."""
-    res = []
-    for i in range(hid.shape[0]):
-        h, w = (int(v) for v in shapes[i])
-        x = hid[i, : h * w].reshape(h, w, -1).permute(2, 0, 1)[None].float()
-        res.append(F.adaptive_avg_pool2d(x, out_hw)[0].flatten(1).T)
-    return torch.stack(res)
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["pca_fit", "dense"],
+        default="dense",
+        help="pca_fit: channel PCA of dense tokens over a sample of TRAIN frames; dense: write a shard",
+    )
+    parser.add_argument("--shard", type=int, default=int(os.environ.get("SLURM_ARRAY_TASK_ID", 0)))
+    parser.add_argument("--num_shards", type=int, default=8)
+    parser.add_argument("--encoder", default=ENCODER)
+    parser.add_argument("--global_patches", type=int, default=1024, help="most SigLIP2 patches per screenshot")
+    parser.add_argument(
+        "--grid", type=int, default=DEFAULT_GRID, help="tokens per frame = grid^2 (the experiment's patch)"
+    )
+    parser.add_argument("--pca_dim", type=int, default=512)
+    parser.add_argument("--pca_frames", type=int, default=16000)
+    parser.add_argument("--batch", dest="batch_size", type=int, default=32)
+    parser.add_argument("--workers", type=int, default=10)
+    return parser.parse_args()
 
 
-def to_bf16_bits(x: torch.Tensor) -> np.ndarray:
-    return x.to(torch.bfloat16).view(torch.int16).cpu().numpy().view(np.uint16)
+def cache_dir(grid: int) -> Path:
+    return paths.BULK / ("frames_dense" + (f"_g{grid}" if grid != DEFAULT_GRID else ""))
 
 
-def out_dir_for(grid: int):
-    return paths.BULK / ("frames_dense" + (f"_g{grid}" if grid != 16 else ""))
-
-
-def pca_path_for(grid: int, pca_dim: int):
+def pca_path(grid: int, pca_dim: int) -> Path:
     return paths.BULK / f"dense_pca_g{grid}_d{pca_dim}.npz"
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["pca_fit", "dense"], default="dense",
-                    help="pca_fit: channel PCA of dense tokens over a sample of TRAIN frames; dense: write a shard")
-    ap.add_argument("--shard", type=int, default=int(os.environ.get("SLURM_ARRAY_TASK_ID", 0)))
-    ap.add_argument("--num_shards", type=int, default=8)
-    ap.add_argument("--encoder", default=ENCODER)
-    ap.add_argument("--global_patches", type=int, default=1024)
-    ap.add_argument("--grid", type=int, default=16, help="tokens per frame = grid^2 (the experiment's patch)")
-    ap.add_argument("--pca_dim", type=int, default=512)
-    ap.add_argument("--pca_frames", type=int, default=16000)
-    ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--workers", type=int, default=10)
-    args = ap.parse_args()
+def all_frames(sessions: list[dict]) -> list[Frame]:
+    """Every step's screenshot, in global step order."""
+    frames: list[Frame] = []
+    for session in sessions:
+        for image in session["images"]:
+            frames.append(Frame(len(frames), session["source"], image, session["split"]))
+    return frames
 
-    out_dir, pca_path = out_dir_for(args.grid), pca_path_for(args.grid, args.pca_dim)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(paths.PREP / "sessions.pkl", "rb") as f:
-        sessions = pickle.load(f)
-    items = [(g, s["source"], img, s["split"]) for g, (s, img) in
-             enumerate((s, img) for s in sessions for img in s["images"])]
-    grid = (args.grid, args.grid)
 
-    from transformers import Siglip2VisionModel
-    vision = Siglip2VisionModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16,
-                                                attn_implementation="sdpa").vision_model.cuda().eval()
-    dim = vision.config.hidden_size
+# ------------------------------------------------------------------------------------------------- encoding
+class FrameDataset(torch.utils.data.Dataset):
+    """Screenshots read from the AgentNet archives in place, preprocessed for SigLIP2 NaFlex."""
 
-    def loader(sel):
-        return torch.utils.data.DataLoader(FrameDataset(sel, args.encoder, args.global_patches), batch_size=args.batch,
-                                           num_workers=args.workers, collate_fn=collate, prefetch_factor=4,
-                                           pin_memory=True)
+    def __init__(self, frames: list[Frame], encoder: str, max_patches: int):
+        self.frames, self.encoder, self.max_patches = frames, encoder, max_patches
+        self.archives = None  # opened on first use, so every loader worker gets its own file handles
 
-    def encode_batch(batch):
-        gi, ok, pv, pm, ps = batch
-        h = vision(pixel_values=pv.cuda(non_blocking=True).to(torch.bfloat16),
-                   attention_mask=pm.cuda(non_blocking=True),
-                   spatial_shapes=ps.cuda(non_blocking=True)).last_hidden_state
-        return gi, ok, pool_grid(h, ps, grid)                            # [B, grid^2, dim] fp32
+    def _open(self) -> None:
+        from transformers import AutoImageProcessor
 
-    if args.mode == "pca_fit":
-        train = [it for it in items if it[3] == "train"]
-        rng = np.random.default_rng(0)
-        sel = [train[i] for i in sorted(rng.choice(len(train), min(args.pca_frames, len(train)), replace=False))]
-        S = torch.zeros(dim, dtype=torch.float64, device="cuda")
-        C = torch.zeros(dim, dim, dtype=torch.float64, device="cuda")
-        n, t0 = 0, time.time()
-        with torch.inference_mode():
-            for bi, batch in enumerate(loader(sel)):
-                gi, ok, x = encode_batch(batch)
-                x = x[ok.cuda()].reshape(-1, dim).double()
-                S += x.sum(0)
-                C += x.T @ x
-                n += x.shape[0]
-                if bi % 100 == 0:
-                    print(f"pca_fit {bi * args.batch}/{len(sel)} frames  {time.time() - t0:.0f}s", flush=True)
-        mean = S / n
-        evals, evecs = torch.linalg.eigh(C / n - torch.outer(mean, mean))
-        evals, evecs = evals.flip(0).clamp(min=0), evecs.flip(1)
-        cum = (evals.cumsum(0) / evals.sum()).cpu().numpy()
-        np.savez(pca_path, mean=mean.float().cpu().numpy(), comps=evecs[:, :args.pca_dim].float().cpu().numpy(),
-                 cum_var=cum, n_tokens=n)
-        print(f"saved {pca_path}: {n} tokens; variance kept at "
-              + ", ".join(f"{k}: {cum[k - 1]:.4f}" for k in (64, 128, 256, 384, 512, 768)), flush=True)
-        return
+        self.processor = AutoImageProcessor.from_pretrained(self.encoder)
+        self.archives = {source: SplitZip(zip_path) for source, zip_path in paths.ZIPS.items()}
+        self.member_paths = {source: archive.basename_index() for source, archive in self.archives.items()}
 
-    pca = np.load(pca_path)
-    mean, comps = torch.from_numpy(pca["mean"]).cuda(), torch.from_numpy(pca["comps"]).cuda()   # comps [dim, pca]
-    n = len(items)
-    bounds = np.linspace(0, n, args.num_shards + 1).astype(int)
-    lo, hi = int(bounds[args.shard]), int(bounds[args.shard + 1])
-    tag = f"{args.shard:02d}of{args.num_shards:02d}"
-    g_path, prog_path = out_dir / f"global_{tag}.npy", out_dir / f"progress_{tag}.json"
-    G = args.grid ** 2
-    start = lo
-    if prog_path.exists() and g_path.exists():                          # resume an interrupted shard
-        start = json.load(open(prog_path))["next"]
-        g_mm = np.load(g_path, mmap_mode="r+")
-        print(f"resuming at {start}", flush=True)
-    else:
-        g_mm = np.lib.format.open_memmap(g_path, mode="w+", dtype=np.uint16, shape=(hi - lo, G, args.pca_dim))
-    print(f"dense shard {tag}: frames [{lo}, {hi}) of {n}", flush=True)
-    t0, done, missing = time.time(), 0, 0
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def __getitem__(self, i: int):
+        if self.archives is None:
+            self._open()
+        frame = self.frames[i]
+        image = self._read_image(frame)
+        found = image is not None
+        if not found:
+            image = Image.new("RGB", PLACEHOLDER_IMAGE_SIZE)
+        inputs = self.processor(images=[image], max_num_patches=self.max_patches, return_tensors="pt")
+        return (
+            frame.step,
+            found,
+            inputs["pixel_values"][0],
+            inputs["pixel_attention_mask"][0],
+            inputs["spatial_shapes"][0],
+        )
+
+    def _read_image(self, frame: Frame) -> Image.Image | None:
+        """None if the screenshot is missing from the archive or unreadable."""
+        try:
+            member = self.member_paths[frame.source].get(frame.image)
+            if member is None:
+                return None
+            return Image.open(io.BytesIO(self.archives[frame.source].read(member))).convert("RGB")
+        except Exception:
+            return None
+
+
+def collate(items: list[tuple]) -> Batch:
+    steps, found, pixel_values, attention_masks, spatial_shapes = zip(*items)
+    return (
+        torch.tensor(steps),
+        torch.tensor(found),
+        torch.stack(pixel_values),
+        torch.stack(attention_masks),
+        torch.stack(spatial_shapes),
+    )
+
+
+class ScreenEncoder:
+    """SigLIP2 vision tower on the GPU: screenshots -> [batch, grid^2, hidden_size] float32 tokens."""
+
+    def __init__(self, args: argparse.Namespace):
+        from transformers import Siglip2VisionModel
+
+        self.args = args
+        self.vision = (
+            Siglip2VisionModel.from_pretrained(args.encoder, torch_dtype=torch.bfloat16, attn_implementation="sdpa")
+            .vision_model.cuda()
+            .eval()
+        )
+        self.hidden_size = self.vision.config.hidden_size
+
+    def loader(self, frames: list[Frame]) -> torch.utils.data.DataLoader:
+        dataset = FrameDataset(frames, self.args.encoder, self.args.global_patches)
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.args.batch_size,
+            num_workers=self.args.workers,
+            collate_fn=collate,
+            prefetch_factor=4,
+            pin_memory=True,
+        )
+
+    def encode(self, batch: Batch) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(global step indices, screenshot found, tokens) of one loader batch."""
+        steps, found, pixel_values, attention_mask, spatial_shapes = batch
+        hidden = self.vision(
+            pixel_values=pixel_values.cuda(non_blocking=True).to(torch.bfloat16),
+            attention_mask=attention_mask.cuda(non_blocking=True),
+            spatial_shapes=spatial_shapes.cuda(non_blocking=True),
+        ).last_hidden_state
+        return steps, found, pool_grid(hidden, spatial_shapes, (self.args.grid, self.args.grid))
+
+
+def pool_grid(hidden: torch.Tensor, spatial_shapes: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+    """SigLIP2 patch outputs [B, n, D] with spatial shapes [B, 2] -> [B, out_h * out_w, D] (adaptive average)."""
+    pooled = []
+    for i in range(hidden.shape[0]):
+        height, width = (int(side) for side in spatial_shapes[i])
+        patch_grid = hidden[i, : height * width].reshape(height, width, -1).permute(2, 0, 1)[None].float()
+        pooled.append(F.adaptive_avg_pool2d(patch_grid, output_size)[0].flatten(1).T)
+    return torch.stack(pooled)
+
+
+def to_bf16_bits(values: torch.Tensor) -> np.ndarray:
+    """The tensor rounded to bfloat16, as the uint16 bit patterns the cache stores."""
+    return values.to(torch.bfloat16).view(torch.int16).cpu().numpy().view(np.uint16)
+
+
+# -------------------------------------------------------------------------------------------------- PCA fit
+def fit_pca(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Namespace) -> None:
+    """Fits the channel PCA on the tokens of a random sample of training frames and writes it to pca_path."""
+    sample = sample_training_frames(frames, args.pca_frames)
+    dim = encoder.hidden_size
+    token_sum = torch.zeros(dim, dtype=torch.float64, device="cuda")
+    outer_product_sum = torch.zeros(dim, dim, dtype=torch.float64, device="cuda")
+    token_count, start_time = 0, time.time()
     with torch.inference_mode():
-        for bi, batch in enumerate(loader(items[start:hi])):
-            gi, ok, x = encode_batch(batch)
-            rows = (gi - lo).numpy()
-            g_mm[rows] = to_bf16_bits((x - mean) @ comps)
+        for batch_index, batch in enumerate(encoder.loader(sample)):
+            _, found, tokens = encoder.encode(batch)
+            tokens = tokens[found.cuda()].reshape(-1, dim).double()
+            token_sum += tokens.sum(0)
+            outer_product_sum += tokens.T @ tokens
+            token_count += tokens.shape[0]
+            if batch_index % 100 == 0:
+                print(
+                    f"pca_fit {batch_index * args.batch_size}/{len(sample)} frames  {time.time() - start_time:.0f}s",
+                    flush=True,
+                )
+
+    mean = token_sum / token_count
+    covariance = outer_product_sum / token_count - torch.outer(mean, mean)
+    eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
+    eigenvalues, eigenvectors = eigenvalues.flip(0).clamp(min=0), eigenvectors.flip(1)  # largest first
+    cumulative_variance = (eigenvalues.cumsum(0) / eigenvalues.sum()).cpu().numpy()
+    output_path = pca_path(args.grid, args.pca_dim)
+    np.savez(
+        output_path,
+        mean=mean.float().cpu().numpy(),
+        comps=eigenvectors[:, : args.pca_dim].float().cpu().numpy(),
+        cum_var=cumulative_variance,
+        n_tokens=token_count,
+    )
+    print(
+        f"saved {output_path}: {token_count} tokens; variance kept at "
+        + ", ".join(f"{dims}: {cumulative_variance[dims - 1]:.4f}" for dims in PCA_REPORT_DIMS),
+        flush=True,
+    )
+
+
+def sample_training_frames(frames: list[Frame], sample_size: int) -> list[Frame]:
+    train_frames = [frame for frame in frames if frame.split == "train"]
+    chosen = np.random.default_rng(0).choice(len(train_frames), min(sample_size, len(train_frames)), replace=False)
+    return [train_frames[i] for i in sorted(chosen)]
+
+
+# ---------------------------------------------------------------------------------------------- cache shards
+def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Namespace, output_dir: Path) -> None:
+    """Writes global_<tag>.npy for this shard's steps, then meta_<tag>.json; an interrupted shard resumes."""
+    pca_file = pca_path(args.grid, args.pca_dim)
+    pca = np.load(pca_file)
+    mean, components = torch.from_numpy(pca["mean"]).cuda(), torch.from_numpy(pca["comps"]).cuda()
+    bounds = np.linspace(0, len(frames), args.num_shards + 1).astype(int)
+    first_step, end_step = int(bounds[args.shard]), int(bounds[args.shard + 1])
+    tag = f"{args.shard:02d}of{args.num_shards:02d}"
+    tokens_per_frame = args.grid**2
+    features_path, progress_path = output_dir / f"global_{tag}.npy", output_dir / f"progress_{tag}.json"
+
+    start_step = first_step
+    if progress_path.exists() and features_path.exists():
+        start_step = json.loads(progress_path.read_text())["next"]
+        features = np.load(features_path, mmap_mode="r+")
+        print(f"resuming at {start_step}", flush=True)
+    else:
+        features = np.lib.format.open_memmap(
+            features_path, mode="w+", dtype=np.uint16, shape=(end_step - first_step, tokens_per_frame, args.pca_dim)
+        )
+    print(f"dense shard {tag}: frames [{first_step}, {end_step}) of {len(frames)}", flush=True)
+
+    start_time, done, missing = time.time(), 0, 0
+    remaining = end_step - start_step
+    with torch.inference_mode():
+        for batch_index, batch in enumerate(encoder.loader(frames[start_step:end_step])):
+            steps, found, tokens = encoder.encode(batch)
+            rows = (steps - first_step).numpy()
+            features[rows] = to_bf16_bits((tokens - mean) @ components)
             done += len(rows)
-            missing += int((~ok).sum())
-            if bi % 200 == 0:
-                g_mm.flush()
-                with open(prog_path, "w") as f:
-                    json.dump({"next": int(rows.max()) + lo + 1}, f)
-                rate = done / (time.time() - t0)
-                print(f"{done}/{hi - start} frames  {rate:.1f}/s  eta {(hi - start - done) / max(rate, 1e-6) / 60:.1f} min",
-                      flush=True)
-    g_mm.flush()
-    meta = {"shard": args.shard, "num_shards": args.num_shards, "lo": lo, "hi": hi, "dim": args.pca_dim,
-            "global_tokens": G, "grid": args.grid, "encoder": args.encoder, "global_patches": args.global_patches,
-            "pca": str(pca_path), "missing": missing}
-    with open(out_dir / f"meta_{tag}.json", "w") as f:
+            missing += int((~found).sum())
+            if batch_index % 200 == 0:
+                features.flush()
+                progress_path.write_text(json.dumps({"next": int(rows.max()) + first_step + 1}))
+                rate = done / (time.time() - start_time)
+                print(
+                    f"{done}/{remaining} frames  {rate:.1f}/s  eta {(remaining - done) / max(rate, 1e-6) / 60:.1f} min",
+                    flush=True,
+                )
+    features.flush()
+
+    # training treats a shard as complete once its meta file exists, so it is written last
+    meta = {
+        "shard": args.shard,
+        "num_shards": args.num_shards,
+        "lo": first_step,
+        "hi": end_step,
+        "dim": args.pca_dim,
+        "global_tokens": tokens_per_frame,
+        "grid": args.grid,
+        "encoder": args.encoder,
+        "global_patches": args.global_patches,
+        "pca": str(pca_file),
+        "missing": missing,
+    }
+    with open(output_dir / f"meta_{tag}.json", "w") as f:
         json.dump(meta, f)
     print("done", meta, flush=True)
 

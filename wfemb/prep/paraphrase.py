@@ -1,17 +1,21 @@
-"""Step 1c' (offline, GPU): paraphrase every instruction with a local instruction-tuned LLM (vLLM).
+"""Paraphrases every unique instruction with a local instruction-tuned LLM (vLLM); writes keys/paraphrases.json.
 
-Same intent, different wording; app/site names and concrete values are kept. The drift filter
-(THETA_PARA, cosine to the original key) is applied later in text_embed.py.
-Runs in its own environment (vLLM pins its own torch):  see runners/slurm/paraphrase.sbatch
+  python -m wfemb.prep.paraphrase [--model Qwen/Qwen2.5-7B-Instruct] [--n 6] [--temperature 0.9] [--limit N] [--tp 1]
+
+Runs in its own environment (runners/slurm/paraphrase.sbatch): vLLM pins its own torch, so this module and what
+it imports may only need the standard library, numpy and vllm.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import pickle
 import re
 
 from ..storage import paths
+from .prepare import load_sessions
+
+PARAPHRASES_PATH = paths.SHARED / "paraphrases.json"
 
 PROMPT = """Rewrite the computer-task instruction below in {n} different ways.
 
@@ -26,57 +30,81 @@ Return only a JSON array of {n} strings.
 Instruction: {instruction}"""
 
 
-def parse_list(text: str, n: int) -> list[str]:
-    m = re.search(r"\[.*\]", text, flags=re.S)
-    if m:
-        try:
-            out = json.loads(m.group(0))
-            return [str(x).strip() for x in out if isinstance(x, str) and x.strip()][:n]
-        except json.JSONDecodeError:
-            pass
-    lines = [re.sub(r'^\s*(\d+[.)]|[-*])\s*', "", l).strip().strip('",') for l in text.splitlines()]
-    return [l for l in lines if len(l) > 3 and not l.startswith(("[", "]"))][:n]
+def load_paraphrases() -> dict[str, list[str]]:
+    """Instruction -> its paraphrases, unfiltered (the key-set builders apply the drift filter)."""
+    with open(PARAPHRASES_PATH) as f:
+        return json.load(f)["paraphrases"]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
-    ap.add_argument("--n", type=int, default=6)
-    ap.add_argument("--temperature", type=float, default=0.9)
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--tp", type=int, default=1)
-    args = ap.parse_args()
-
+def main() -> None:
+    args = parse_arguments()
     from vllm import LLM, SamplingParams
 
-    with open(paths.PREP / "sessions.pkl", "rb") as f:
-        sessions = pickle.load(f)
-    instructions = sorted({s["instruction"] for s in sessions})
+    instructions = sorted({session["instruction"] for session in load_sessions()})
     if args.limit:
         instructions = instructions[: args.limit]
     print(f"{len(instructions)} unique instructions")
 
-    llm = LLM(model=args.model, dtype="bfloat16", tensor_parallel_size=args.tp,
-              max_model_len=4096, gpu_memory_utilization=0.90, seed=0)
-    sp = SamplingParams(temperature=args.temperature, top_p=0.95, max_tokens=1024, seed=0)
-    msgs = [[{"role": "user", "content": PROMPT.format(n=args.n, instruction=ins)}] for ins in instructions]
-    outs = llm.chat(msgs, sp, use_tqdm=True)
+    llm = LLM(
+        model=args.model,
+        dtype="bfloat16",
+        tensor_parallel_size=args.tensor_parallel_size,
+        max_model_len=4096,
+        gpu_memory_utilization=0.90,
+        seed=0,
+    )
+    sampling = SamplingParams(temperature=args.temperature, top_p=0.95, max_tokens=1024, seed=0)
+    conversations = [
+        [{"role": "user", "content": PROMPT.format(n=args.count, instruction=instruction)}]
+        for instruction in instructions
+    ]
+    replies = [output.outputs[0].text for output in llm.chat(conversations, sampling, use_tqdm=True)]
 
-    result, raw, short = {}, {}, 0
-    for ins, o in zip(instructions, outs):
-        raw[ins] = o.outputs[0].text
-        paras = [p for p in parse_list(raw[ins], args.n) if p.lower() != ins.lower()]
-        short += len(paras) < args.n
-        result[ins] = paras
+    paraphrases = {
+        instruction: distinct_paraphrases(reply, instruction, args.count)
+        for instruction, reply in zip(instructions, replies)
+    }
     paths.SHARED.mkdir(parents=True, exist_ok=True)
-    out_path = paths.SHARED / "paraphrases.json"
-    with open(out_path, "w") as f:
-        json.dump({"model": args.model, "n": args.n, "paraphrases": result, "raw": raw}, f)
-    print(f"wrote {out_path}; {short} instructions got fewer than {args.n} paraphrases")
-    for ins in instructions[:5]:
-        print("\n#", ins)
-        for p in result[ins]:
-            print("  -", p)
+    with open(PARAPHRASES_PATH, "w") as f:
+        json.dump(
+            {"model": args.model, "n": args.count, "paraphrases": paraphrases, "raw": dict(zip(instructions, replies))},
+            f,
+        )
+
+    incomplete = sum(len(rewrites) < args.count for rewrites in paraphrases.values())
+    print(f"wrote {PARAPHRASES_PATH}; {incomplete} instructions got fewer than {args.count} paraphrases")
+    for instruction in instructions[:5]:
+        print("\n#", instruction)
+        for rewrite in paraphrases[instruction]:
+            print("  -", rewrite)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
+    parser.add_argument("--n", dest="count", type=int, default=6, help="paraphrases per instruction")
+    parser.add_argument("--temperature", type=float, default=0.9)
+    parser.add_argument("--limit", type=int, default=0, help="only the first N instructions")
+    parser.add_argument("--tp", dest="tensor_parallel_size", type=int, default=1)
+    return parser.parse_args()
+
+
+def distinct_paraphrases(reply: str, instruction: str, count: int) -> list[str]:
+    """The paraphrases in an LLM reply, without copies of the instruction itself."""
+    return [rewrite for rewrite in parse_paraphrases(reply, count) if rewrite.lower() != instruction.lower()]
+
+
+def parse_paraphrases(reply: str, limit: int) -> list[str]:
+    """The strings of the JSON array in the reply; if there is none, one paraphrase per (numbered or bulleted) line."""
+    array = re.search(r"\[.*\]", reply, flags=re.S)
+    if array:
+        try:
+            items = json.loads(array.group(0))
+            return [str(item).strip() for item in items if isinstance(item, str) and item.strip()][:limit]
+        except json.JSONDecodeError:
+            pass
+    lines = [re.sub(r"^\s*(\d+[.)]|[-*])\s*", "", line).strip().strip('",') for line in reply.splitlines()]
+    return [line for line in lines if len(line) > 3 and not line.startswith(("[", "]"))][:limit]
 
 
 if __name__ == "__main__":

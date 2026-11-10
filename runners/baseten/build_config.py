@@ -1,5 +1,6 @@
 """Baseten job: build frame caches (see runners/baseten/build.sh). Push from the repo root:
-  truss train push runners/baseten/build_config.py --job-name build"""
+truss train push runners/baseten/build_config.py --job-name build"""
+
 from pathlib import Path
 
 from truss.base.truss_config import AcceleratorSpec
@@ -16,7 +17,9 @@ project = TrainingProject(
             environment_variables={"HF_TOKEN": SecretReference(name="hf_access_token")},
             cache_config=CacheConfig(enabled=True),
         ),
-        workspace=Workspace(workspace_root=str(ROOT), exclude_dirs=[str(ROOT / d) for d in
-                            ("docs", ".git", ".venv", "results", "dashboard", "legacy_runs")]),
+        workspace=Workspace(
+            workspace_root=str(ROOT),
+            exclude_dirs=[str(ROOT / d) for d in ("docs", ".git", ".venv", "results", "dashboard", "legacy_runs")],
+        ),
     ),
 )

@@ -14,6 +14,7 @@ Standard library only. Serves the static frontend in dashboard/static/ and a sma
 
 Parsed files are cached by (path, mtime, size); a growing steps.jsonl is parsed incrementally (only the new bytes).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,7 +30,6 @@ import time
 from array import array
 from collections import OrderedDict
 from email.utils import formatdate, parsedate_to_datetime
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -38,10 +38,11 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 STATIC = HERE / "static"
 
-# The best model so far (read from docs/EXPERIMENTS.md at startup; this is the fallback). Only used to order variables and
-# to mark the segments of an id that differ from it; every run's variables come from its own folder path.
-REFERENCE_ID = ("arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45"
-                "_beta-0_seed-0")
+# The best model so far (read from docs/EXPERIMENTS.md at startup; this is the fallback). Only used to order
+# variables and to mark the segments of an id that differ from it; every run's variables come from its own folder path.
+REFERENCE_ID = (
+    "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0"
+)
 DOC_REF = re.compile(r"best model so far is\s*`([^`]+)`")
 
 
@@ -54,7 +55,7 @@ def doc_reference_id() -> str:
     return m.group(1).strip() if m else REFERENCE_ID
 
 
-X_COLS = {"step", "epoch", "time"}       # kept at more precision when downsampled / serialized
+X_COLS = {"step", "epoch", "time"}  # kept at more precision when downsampled / serialized
 NAN = float("nan")
 
 
@@ -167,18 +168,18 @@ class Table:
     """A parsed jsonl file as numeric columns (array('d'), NaN where a row lacks the key or it is not a number)."""
 
     __slots__ = ("cols", "n", "offset", "n_committed", "sig", "bad", "anchor")
-    ANCHOR = 256                    # bytes before `offset` remembered to recognise an appended (not rewritten) file
+    ANCHOR = 256  # bytes before `offset` remembered to recognise an appended (not rewritten) file
 
     def __init__(self):
         self.cols: dict[str, array] = {}
-        self.n = 0                  # rows, including a provisional last row without a trailing newline
-        self.n_committed = 0        # rows ending in a newline (an appending writer may still be writing the tail)
-        self.offset = 0             # bytes consumed by committed rows
+        self.n = 0  # rows, including a provisional last row without a trailing newline
+        self.n_committed = 0  # rows ending in a newline (an appending writer may still be writing the tail)
+        self.offset = 0  # bytes consumed by committed rows
         self.sig = None
-        self.bad = 0                # unparseable lines
-        self.anchor = b""           # the last ANCHOR committed bytes
+        self.bad = 0  # unparseable lines
+        self.anchor = b""  # the last ANCHOR committed bytes
 
-    def copy(self) -> "Table":
+    def copy(self) -> Table:
         t = Table()
         t.cols = {k: array("d", a) for k, a in self.cols.items()}
         t.n, t.n_committed, t.offset, t.sig, t.bad = self.n, self.n_committed, self.offset, self.sig, self.bad
@@ -208,13 +209,13 @@ class Table:
         """Parse bytes following self.offset (which ends at a line boundary)."""
         self.truncate(self.n_committed)
         end = data.rfind(b"\n")
-        complete, tail = (data[:end], data[end + 1:]) if end >= 0 else (b"", data)
+        complete, tail = (data[:end], data[end + 1 :]) if end >= 0 else (b"", data)
         for line in complete.split(b"\n") if complete else ():
             self._line(line)
         self.n_committed = self.n
         if end >= 0:
             self.offset += end + 1
-            self.anchor = (self.anchor + data[:end + 1])[-self.ANCHOR:]
+            self.anchor = (self.anchor + data[: end + 1])[-self.ANCHOR :]
         if tail.strip():
             self._line(tail, provisional=True)
 
@@ -283,7 +284,7 @@ def tail_row(p: Path, cache: LRU):
                 f.seek(max(0, size - back))
                 lines = f.read().split(b"\n")
                 if back < size:
-                    lines = lines[1:]          # the first line is probably cut
+                    lines = lines[1:]  # the first line is probably cut
                 for line in reversed(lines):
                     line = line.strip()
                     if not line:
@@ -320,7 +321,7 @@ def downsample(t: Table, max_points: int, minmax: bool, cols: list[str] | None):
             continue
         m, mn, mx = [], [], []
         for i in range(0, n, k):
-            chunk = [v for v in a[i:i + k] if v == v]
+            chunk = [v for v in a[i : i + k] if v == v]
             if chunk:
                 m.append(fnum(math.fsum(chunk) / len(chunk), dig))
                 if minmax:
@@ -351,10 +352,10 @@ class Results:
         self.stale_s = stale_minutes * 60
         self.reference_id = reference_id
         self.json = JsonCache()
-        self.evals = JsonlCache(None)          # small; every run's is needed for the run list
-        self.steps = JsonlCache(48)            # large; only for runs being plotted
+        self.evals = JsonlCache(None)  # small; every run's is needed for the run list
+        self.steps = JsonlCache(48)  # large; only for runs being plotted
         self.tails = LRU(None)
-        self.ds_cache = LRU(256)          # downsampled series
+        self.ds_cache = LRU(256)  # downsampled series
         self.index: dict[str, Path] = {}
         self.scan_lock = threading.Lock()
 
@@ -368,7 +369,7 @@ class Results:
                     rel = d.relative_to(self.root)
                     if rel.parts:
                         found["_".join(rel.parts)] = d
-                    dirnames[:] = []                      # run folders are leaves
+                    dirnames[:] = []  # run folders are leaves
                 else:
                     dirnames[:] = sorted(x for x in dirnames if not x.startswith("."))
         with self.scan_lock:
@@ -392,8 +393,11 @@ class Results:
     def bundle_ids(self) -> list[str]:
         if not self.bundles.is_dir():
             return []
-        return sorted(p.name for p in self.bundles.iterdir()
-                      if p.is_dir() and ((p / "background.json").exists() or (p / "workflows" / "index.json").exists()))
+        return sorted(
+            p.name
+            for p in self.bundles.iterdir()
+            if p.is_dir() and ((p / "background.json").exists() or (p / "workflows" / "index.json").exists())
+        )
 
     # ------------------------------------------------------------------ one run
     def summary(self, run_id: str, d: Path, now: float, bundles: set[str]) -> dict:
@@ -414,10 +418,6 @@ class Results:
         cid = cfg.get("id") if isinstance(cfg, dict) else None
         if cid and cid != run_id:
             warnings.append(f"config.json id {cid} differs from the folder path")
-        if isinstance(exp, dict):
-            for k, v in variables:
-                if k in exp and canon(exp[k]) != v:
-                    warnings.append(f"config.json experiment.{k} = {canon(exp[k])}, folder says {v}")
 
         mtimes = [s[0] / 1e9 for s in (stat_sig(steps_p), stat_sig(evals_p), stat_sig(d / "config.json")) if s]
         last_update = max(mtimes) if mtimes else None
@@ -441,39 +441,41 @@ class Results:
                     best_val_step = st[bi] if st is not None else None
             last_eval = {k: a[ev.n - 1] for k, a in ev.cols.items()}
         total = meta.get("total_steps")
-        if total is None and meta.get("steps_per_epoch") and isinstance(exp, dict) and exp.get("ep"):
+        if total is None and meta.get("steps_per_epoch") and isinstance(exp, dict) and exp.get("n_epochs"):
             try:
-                total = int(meta["steps_per_epoch"]) * int(exp["ep"])
+                total = int(meta["steps_per_epoch"]) * int(exp["n_epochs"])
             except (TypeError, ValueError):
                 total = None
         sv, ev_sig = stat_sig(steps_p), stat_sig(evals_p)
-        return clean({
-            "id": run_id,
-            "path": str(d.relative_to(self.root)) if d.is_relative_to(self.root) else str(d),
-            "vars": dict(variables),
-            "status": status,
-            "last_step": tail.get("step"),
-            "last_epoch": tail.get("epoch"),
-            "last_time": tail.get("time"),
-            "last_loss": tail.get("loss"),
-            "total_steps": total,
-            "steps_per_epoch": meta.get("steps_per_epoch"),
-            "n_evals": ev.n if ev is not None else 0,
-            "best_val_loss": best_val,
-            "best_val_step": best_val_step,
-            "last_eval": last_eval,
-            "final": final,
-            "legacy": bool(meta.get("legacy")),
-            "legacy_name": meta.get("legacy_name"),
-            "start_time": meta.get("started_at") or meta.get("start_time"),
-            "host": meta.get("host"),
-            "launcher": meta.get("launcher"),
-            "n_params": meta.get("n_params"),
-            "last_update": last_update,
-            "has_bundle": run_id in bundles,
-            "version": f"{sv[0] if sv else 0}.{sv[1] if sv else 0}.{ev_sig[0] if ev_sig else 0}.{ev_sig[1] if ev_sig else 0}",
-            "warnings": warnings,
-        })
+        return clean(
+            {
+                "id": run_id,
+                "path": str(d.relative_to(self.root)) if d.is_relative_to(self.root) else str(d),
+                "vars": dict(variables),
+                "status": status,
+                "last_step": tail.get("step"),
+                "last_epoch": tail.get("epoch"),
+                "last_time": tail.get("time"),
+                "last_loss": tail.get("loss"),
+                "total_steps": total,
+                "steps_per_epoch": meta.get("steps_per_epoch"),
+                "n_evals": ev.n if ev is not None else 0,
+                "best_val_loss": best_val,
+                "best_val_step": best_val_step,
+                "last_eval": last_eval,
+                "final": final,
+                "legacy": bool(meta.get("legacy")),
+                "legacy_name": meta.get("legacy_name"),
+                "start_time": meta.get("started_at") or meta.get("start_time"),
+                "host": meta.get("host"),
+                "launcher": meta.get("launcher"),
+                "n_params": meta.get("n_params"),
+                "last_update": last_update,
+                "has_bundle": run_id in bundles,
+                "version": ".".join(str(part) for part in (*(sv or (0, 0))[:2], *(ev_sig or (0, 0))[:2])),
+                "warnings": warnings,
+            }
+        )
 
     def runs(self) -> dict:
         now = time.time()
@@ -481,14 +483,21 @@ class Results:
         bset = set(bundles)
         index = self.scan()
         runs = [self.summary(rid, d, now, bset) for rid, d in sorted(index.items())]
-        try:                                   # how to spell the bundles folder in commands run from the repo root
+        try:  # how to spell the bundles folder in commands run from the repo root
             bundles_out = str(self.bundles.relative_to(REPO))
         except ValueError:
             bundles_out = str(self.bundles)
-        return {"now": now, "results_root": str(self.root), "bundles_root": str(self.bundles), "bundles_out": bundles_out,
-                "jobs_root": str(self.jobs),
-                "stale_minutes": self.stale_s / 60, "reference_id": self.reference_id, "runs": runs,
-                "bundles": bundles}
+        return {
+            "now": now,
+            "results_root": str(self.root),
+            "bundles_root": str(self.bundles),
+            "bundles_out": bundles_out,
+            "jobs_root": str(self.jobs),
+            "stale_minutes": self.stale_s / 60,
+            "reference_id": self.reference_id,
+            "runs": runs,
+            "bundles": bundles,
+        }
 
     def run(self, run_id: str) -> dict | None:
         d = self.run_dir(run_id)
@@ -501,10 +510,18 @@ class Results:
                 st = p.stat()
                 files[p.name] = {"size": st.st_size, "mtime": st.st_mtime}
         final_p = d / "final.json"
-        return clean({"run": self.summary(run_id, d, time.time(), bset), "config": self.json.load(d / "config.json"),
-                      "final": self.json.load(final_p) if final_p.exists() else None, "files": files})
+        return clean(
+            {
+                "run": self.summary(run_id, d, time.time(), bset),
+                "config": self.json.load(d / "config.json"),
+                "final": self.json.load(final_p) if final_p.exists() else None,
+                "files": files,
+            }
+        )
 
-    def series(self, run_id: str, max_points: int, minmax: bool, which: list[str], cols: list[str] | None) -> dict | None:
+    def series(
+        self, run_id: str, max_points: int, minmax: bool, which: list[str], cols: list[str] | None
+    ) -> dict | None:
         d = self.run_dir(run_id)
         if d is None:
             return None
@@ -540,8 +557,15 @@ class Results:
             text = self.jobs.read_text(encoding="utf-8", errors="replace") if self.jobs.is_file() else ""
             mtime = self.jobs.stat().st_mtime if self.jobs.is_file() else None
         except OSError as e:
-            return clean({"jobs_root": str(self.jobs), "reference_id": self.reference_id, "error": str(e),
-                          "files": [], "unqueued": sorted(index)})
+            return clean(
+                {
+                    "jobs_root": str(self.jobs),
+                    "reference_id": self.reference_id,
+                    "error": str(e),
+                    "files": [],
+                    "unqueued": sorted(index),
+                }
+            )
         cur = None
         for ln, raw in enumerate(text.splitlines(), 1):
             body, _, comment = raw.partition("#")
@@ -555,7 +579,7 @@ class Results:
                 if cur is not None and comment and not cur["entries"]:
                     cur["header"].append(comment)
                 continue
-            if cur is None:                                   # a run before any [section]
+            if cur is None:  # a run before any [section]
                 cur = {"name": "(no section)", "header": [], "entries": [], "mtime": mtime, "line": ln}
                 sections.append(cur)
             toks = body.split()
@@ -577,17 +601,27 @@ class Results:
                 status[rid] = None if d is None else self.summary(rid, d, now, bset)
             st = status[rid]
             seen_ids.add(rid)
-            cur["entries"].append({
-                "line": ln, "id": rid, "overrides": overrides, "comment": comment or None,
-                "status": st["status"] if st else "not started", "problems": problems,
-                "last_step": st["last_step"] if st else None, "total_steps": st["total_steps"] if st else None,
-                "best_val_loss": st["best_val_loss"] if st else None,
-                "final": {k: v for k, v in (st.get("final") or {}).items() if k.startswith("test_")} if st else None,
-            })
+            cur["entries"].append(
+                {
+                    "line": ln,
+                    "id": rid,
+                    "overrides": overrides,
+                    "comment": comment or None,
+                    "status": st["status"] if st else "not started",
+                    "problems": problems,
+                    "last_step": st["last_step"] if st else None,
+                    "total_steps": st["total_steps"] if st else None,
+                    "best_val_loss": st["best_val_loss"] if st else None,
+                    "final": {k: v for k, v in (st.get("final") or {}).items() if k.startswith("test_")}
+                    if st
+                    else None,
+                }
+            )
         unqueued = sorted(rid for rid in index if rid not in seen_ids)
         # "files" = the sections (the frontend groups by it)
-        return clean({"jobs_root": str(self.jobs), "reference_id": self.reference_id, "files": sections,
-                      "unqueued": unqueued})
+        return clean(
+            {"jobs_root": str(self.jobs), "reference_id": self.reference_id, "files": sections, "unqueued": unqueued}
+        )
 
 
 # --------------------------------------------------------------------------------------------------- http
@@ -609,12 +643,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         if self.verbose:
-            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+            sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
 
     # ------------------------------------------------------------------ responses
     def send_bytes(self, body: bytes, ctype: str, status: int = 200, headers: dict | None = None, head=False):
-        if (len(body) > 32_768 and "gzip" in (self.headers.get("Accept-Encoding") or "")
-                and (ctype.startswith("application/json") or ctype.startswith("text/"))):
+        if (
+            len(body) > 32_768
+            and "gzip" in (self.headers.get("Accept-Encoding") or "")
+            and (ctype.startswith("application/json") or ctype.startswith("text/"))
+        ):
             body = gzip.compress(body, compresslevel=5)
             headers = {**(headers or {}), "Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
         self.send_response(status)
@@ -654,8 +691,13 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
             ctype += "; charset=utf-8"
-        self.send_bytes(p.read_bytes(), ctype, 200,
-                        {"Last-Modified": formatdate(st.st_mtime, usegmt=True), "Cache-Control": cache}, head)
+        self.send_bytes(
+            p.read_bytes(),
+            ctype,
+            200,
+            {"Last-Modified": formatdate(st.st_mtime, usegmt=True), "Cache-Control": cache},
+            head,
+        )
 
     # ------------------------------------------------------------------ routing
     def do_HEAD(self):
@@ -668,6 +710,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except Exception as e:  # noqa: BLE001  (report, keep serving)
             import traceback
+
             traceback.print_exc()
             try:
                 self.send_error_json(500, f"{type(e).__name__}: {e}", head)
@@ -703,7 +746,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(R.queue(), head=head)
             return self.send_error_json(404, "unknown endpoint", head)
         if path.startswith("/bundles/"):
-            p = safe_join(R.bundles, path[len("/bundles/"):])
+            p = safe_join(R.bundles, path[len("/bundles/") :])
             if p is None:
                 return self.send_error_json(403, "bad path", head)
             return self.send_file(p, head)
@@ -716,16 +759,28 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--results", default=os.environ.get("WFEMB_RESULTS", str(REPO / "results")),
-                    help="results root (default $WFEMB_RESULTS or <repo>/results)")
-    ap.add_argument("--bundles", default=str(REPO / "dashboard" / "bundles"), help="demo bundles, one folder per run id")
+    ap.add_argument(
+        "--results",
+        default=os.environ.get("WFEMB_RESULTS", str(REPO / "results")),
+        help="results root (default $WFEMB_RESULTS or <repo>/results)",
+    )
+    ap.add_argument(
+        "--bundles", default=str(REPO / "dashboard" / "bundles"), help="demo bundles, one folder per run id"
+    )
     ap.add_argument("--jobs", default=str(REPO / "jobs.txt"), help="the run queue file")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--stale-minutes", type=float, default=15,
-                    help="a run without final.json is 'running' if its files changed within this many minutes")
-    ap.add_argument("--reference-id", default=None,
-                    help="id whose values count as the defaults (default: the best model in docs/EXPERIMENTS.md)")
+    ap.add_argument(
+        "--stale-minutes",
+        type=float,
+        default=15,
+        help="a run without final.json is 'running' if its files changed within this many minutes",
+    )
+    ap.add_argument(
+        "--reference-id",
+        default=None,
+        help="id whose values count as the defaults (default: the best model in docs/EXPERIMENTS.md)",
+    )
     ap.add_argument("--verbose", action="store_true", help="log every request")
     a = ap.parse_args(argv)
 
@@ -733,7 +788,9 @@ def main(argv=None):
         p = Path(p).expanduser()
         return (p if p.is_absolute() else Path.cwd() / p).resolve()
 
-    Handler.R = Results(rel(a.results), rel(a.bundles), rel(a.jobs), a.stale_minutes, a.reference_id or doc_reference_id())
+    Handler.R = Results(
+        rel(a.results), rel(a.bundles), rel(a.jobs), a.stale_minutes, a.reference_id or doc_reference_id()
+    )
     Handler.verbose = a.verbose
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("text/css", ".css")
@@ -743,10 +800,13 @@ def main(argv=None):
         sys.exit(f"cannot listen on {a.host}:{a.port}: {e} (try --port)")
     srv.daemon_threads = True
     R = Handler.R
-    print(f"results {R.root}{'' if R.root.is_dir() else ' (missing)'}\n"
-          f"bundles {R.bundles}{'' if R.bundles.is_dir() else ' (missing)'}\n"
-          f"jobs    {R.jobs}{'' if R.jobs.is_file() else ' (missing)'}\n"
-          f"dashboard on http://{a.host}:{a.port}/", flush=True)
+    print(
+        f"results {R.root}{'' if R.root.is_dir() else ' (missing)'}\n"
+        f"bundles {R.bundles}{'' if R.bundles.is_dir() else ' (missing)'}\n"
+        f"jobs    {R.jobs}{'' if R.jobs.is_file() else ' (missing)'}\n"
+        f"dashboard on http://{a.host}:{a.port}/",
+        flush=True,
+    )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

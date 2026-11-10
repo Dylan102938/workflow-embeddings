@@ -1,15 +1,12 @@
-"""Trace-judged relevance pool for session-to-session retrieval (pseudocode section 6).
+"""Trace-judged relevance pool for session-to-session retrieval: pools candidate pairs, an LLM labels each pair.
 
-For each query session in a split, candidate sessions from the same split are pooled from several
-retrievers (instruction keys, action TF-IDF, same-app random, known duplicate groups). An LLM judge
-labels each unordered pair from the two sessions' step traces:
-  2 = same workflow, 1 = related (same app, partially overlapping), 0 = different.
-Pairs outside the pool are treated as non-relevant (standard IR pooling).
+  python -m wfemb.prep.judge_pool --split val --mode dry                # pool sizes, token estimate, two prompts
+  python -m wfemb.prep.judge_pool --split val --mode sync --limit 40    # pilot: cost and label quality
+  python -m wfemb.prep.judge_pool --split val --mode batch              # full run (Message Batches); collect resumes
 
-  python -m wfemb.judge_pool --split val --mode sync --limit 40     # pilot: measure cost + label quality
-  python -m wfemb.judge_pool --split val --mode batch               # full run (Message Batches, 50% price)
-Outputs: KEYS/judged_<split>.jsonl  ({"a", "b", "label", "rationale", "sources"} per line, a/b = session idx)
+Procedure, labels and the judged_<split>.jsonl format: docs/DATA_PREP.md.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,11 +15,14 @@ import json
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
 from ..storage import paths
 from .actions import EVENT_TYPES
+from .prepare import load_sessions
 
 MODEL = "claude-opus-5-5"
 
@@ -50,218 +50,340 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
+STANDARD_USD_PER_MILLION_TOKENS = {"in": 4, "out": 20}
+BATCH_USD_PER_MILLION_TOKENS = {"in": 2, "out": 10}
+CHARACTERS_PER_TOKEN = 3.5
+SCREEN_CELLS_PER_SIDE = 4
+BATCH_POLL_SECONDS = 120
 
-def action_docs(ev: dict) -> list[str]:
-    """One bag-of-actions document per session (event type, coarse 4x4 screen cell, key tokens), for TF-IDF pooling."""
-    docs = []
-    for o, L in zip(ev["sess_offset"], ev["sess_len"]):
-        toks = []
-        for g in range(int(o), int(o) + int(L)):
-            for j in range(ev["ev_type"].shape[1]):
-                t = int(ev["ev_type"][g, j])
-                if t == 0:
+Pair = tuple[int, int]  # session indices, smaller first
+Pool = dict[Pair, set[str]]  # pair -> the retrievers that proposed it
+
+
+class JudgeRequest(NamedTuple):
+    first: int
+    second: int
+    params: dict  # keyword arguments of messages.create
+
+
+def main() -> None:
+    args = parse_arguments()
+    sessions = load_sessions()
+    keys = np.load(paths.SHARED / "keys.npy")
+    session_indices = [i for i, session in enumerate(sessions) if session["split"] == args.split]
+    judged_path = paths.SHARED / f"judged_{args.split}.jsonl"
+    batch_state_path = paths.SHARED / f"judged_{args.split}_batch.json"
+
+    judged = judged_pairs(judged_path)
+    pool = build_pool(
+        keys, sessions, session_indices, action_docs(load_events()), args.k_key, args.k_action, args.k_app, args.seed
+    )
+    to_judge = [pair for pair in sorted(pool) if pair not in judged]
+    rng = random.Random(args.seed)
+    if args.limit:
+        to_judge = rng.sample(to_judge, min(args.limit, len(to_judge)))
+    retriever_counts = collections.Counter(retriever for pair in pool for retriever in pool[pair])
+    print(
+        f"{args.split}: {len(session_indices)} sessions, {len(pool)} pooled pairs ({dict(retriever_counts)}), "
+        f"{len(judged)} already judged, {len(to_judge)} to judge",
+        flush=True,
+    )
+
+    requests = build_requests(sessions, to_judge, rng)
+    prompt_characters = sum(
+        len(request.params["system"]) + len(request.params["messages"][0]["content"]) for request in requests.values()
+    )
+    print(f"~{prompt_characters / CHARACTERS_PER_TOKEN / 1e6:.2f}M input tokens (chars/3.5 estimate)", flush=True)
+
+    if args.mode == "dry":
+        for request_id, request in list(requests.items())[:2]:
+            print(
+                "\n----",
+                request_id,
+                pool[(request.first, request.second)],
+                "\n" + request.params["messages"][0]["content"][:1500],
+            )
+        return
+
+    import anthropic
+
+    client = anthropic.Anthropic()
+    writer = JudgmentWriter(judged_path, pool)
+    if args.mode == "sync":
+        judge_synchronously(client, requests, writer, args.workers)
+        return
+    if args.mode == "batch":
+        batch_id = submit_batch(client, requests, batch_state_path)
+    else:
+        batch_id = args.batch_id or json.loads(batch_state_path.read_text())["batch_id"]
+    collect_batch(client, batch_id, writer)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split", default="val")
+    parser.add_argument("--mode", choices=["dry", "sync", "batch", "collect"], default="dry")
+    parser.add_argument("--limit", type=int, default=0, help="judge only N random pairs (pilot)")
+    parser.add_argument("--k_key", type=int, default=4, help="nearest sessions by instruction key, per query")
+    parser.add_argument("--k_action", type=int, default=2, help="nearest sessions by action TF-IDF, per query")
+    parser.add_argument("--k_app", type=int, default=1, help="random sessions of the same app, per query")
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--batch_id", default="")
+    return parser.parse_args()
+
+
+def load_events() -> dict[str, np.ndarray]:
+    events = np.load(paths.PREP / "events.npz")
+    return {name: events[name] for name in events.files}
+
+
+def judged_pairs(judged_path: Path) -> set[Pair]:
+    if not judged_path.exists():
+        return set()
+    with open(judged_path) as f:
+        return {(judgment["a"], judgment["b"]) for judgment in map(json.loads, f)}
+
+
+# --------------------------------------------------------------------------------------------------- pooling
+def action_docs(events: dict[str, np.ndarray]) -> list[str]:
+    """One bag-of-actions document per session (event type, coarse screen cell, key ids), for TF-IDF pooling."""
+    documents = []
+    for offset, length in zip(events["sess_offset"], events["sess_len"]):
+        tokens = []
+        for step in range(int(offset), int(offset) + int(length)):
+            for slot in range(events["ev_type"].shape[1]):
+                type_id = int(events["ev_type"][step, slot])
+                if type_id == 0:
                     continue
-                tok = EVENT_TYPES[t]
-                xy = ev["ev_xy"][g, j]
-                if not (np.isnan(xy[0]) or np.isnan(xy[1])):
-                    tok += f"@{int(min(xy[0], 0.999) * 4)}{int(min(xy[1], 0.999) * 4)}"
-                ks = [k for k in ev["ev_keys"][g, j] if k > 0]
-                if ks:
-                    tok += "+" + "_".join(map(str, ks))
-                toks.append(tok)
-        docs.append(" ".join(toks) if toks else "empty")
-    return docs
+                token = EVENT_TYPES[type_id]
+                x, y = events["ev_xy"][step, slot][:2]
+                if not (np.isnan(x) or np.isnan(y)):
+                    token += f"@{screen_cell(x)}{screen_cell(y)}"
+                key_ids = [key_id for key_id in events["ev_keys"][step, slot] if key_id > 0]
+                if key_ids:
+                    token += "+" + "_".join(map(str, key_ids))
+                tokens.append(token)
+        documents.append(" ".join(tokens) if tokens else "empty")
+    return documents
 
 
-def load_traces(sessions, idx):
-    """Instruction + natural-language step actions for the given sessions (read from the raw jsonl)."""
-    want = {sessions[i]["id"]: i for i in idx}
-    out = {}
-    for src, jp in paths.JSONLS.items():
-        with open(jp) as f:
+def screen_cell(coordinate: float) -> int:
+    return int(min(coordinate, 0.999) * SCREEN_CELLS_PER_SIDE)
+
+
+def build_pool(
+    keys: np.ndarray,
+    sessions: list[dict],
+    session_indices: list[int],
+    action_documents: list[str],
+    k_key: int,
+    k_action: int,
+    k_app: int,
+    seed: int,
+) -> Pool:
+    """Unordered candidate pairs within the split, each with the retrievers that proposed it:
+    "key" (nearest instruction keys), "action" (nearest action TF-IDF), "app" (random, same app), "dup" (same group)."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    rng = random.Random(seed)
+    session_indices = np.asarray(session_indices)
+
+    split_keys = keys[session_indices]
+    key_similarity = split_keys @ split_keys.T
+    np.fill_diagonal(key_similarity, -np.inf)
+    tfidf = TfidfVectorizer(ngram_range=(1, 3), token_pattern=r"\S+", min_df=1, sublinear_tf=True).fit_transform(
+        [action_documents[i] for i in session_indices]
+    )
+    action_similarity = (tfidf @ tfidf.T).toarray()
+    np.fill_diagonal(action_similarity, -np.inf)
+
+    by_app, by_group = collections.defaultdict(list), collections.defaultdict(list)
+    for i in session_indices:
+        by_app[sessions[i]["app"]].append(int(i))
+        by_group[sessions[i]["group"]].append(int(i))
+
+    pool: Pool = collections.defaultdict(set)
+
+    def propose(query: int, candidate: int, retriever: str) -> None:
+        if query != candidate:
+            pool[(min(query, candidate), max(query, candidate))].add(retriever)
+
+    # the rng draws below happen once per query, in split order: reordering them changes the pool
+    for position, query in enumerate(session_indices):
+        query = int(query)
+        for neighbor in np.argsort(-key_similarity[position])[:k_key]:
+            propose(query, int(session_indices[neighbor]), "key")
+        for neighbor in np.argsort(-action_similarity[position])[:k_action]:
+            propose(query, int(session_indices[neighbor]), "action")
+        same_app = [other for other in by_app[sessions[query]["app"]] if other != query]
+        for other in rng.sample(same_app, min(k_app, len(same_app))):
+            propose(query, other, "app")
+        for other in by_group[sessions[query]["group"]]:
+            propose(query, other, "dup")
+    return pool
+
+
+# -------------------------------------------------------------------------------------------------- requests
+def load_traces(sessions: list[dict], session_indices: list[int]) -> dict[int, list[str]]:
+    """The natural-language action of every step of the given sessions, read from the raw AgentNet jsonl."""
+    wanted = {sessions[i]["id"]: i for i in session_indices}
+    traces: dict[int, list[str]] = {}
+    for jsonl_path in paths.JSONLS.values():
+        with open(jsonl_path) as f:
             for line in f:
-                d = json.loads(line)
-                i = want.get(d["task_id"])
-                if i is None or i in out:
+                record = json.loads(line)
+                session_index = wanted.get(record["task_id"])
+                if session_index is None or session_index in traces:
                     continue
-                steps = sorted(d["traj"], key=lambda s: s["index"])
-                acts = [(s["value"].get("action") or "").strip() for s in steps]
-                out[i] = acts
-    return out
+                steps = sorted(record["traj"], key=lambda step: step["index"])
+                traces[session_index] = [(step["value"].get("action") or "").strip() for step in steps]
+    return traces
 
 
-def render(s, acts) -> str:
-    app = s["app"].split(":", 1)[-1]
-    lines = [f"Instruction: {s['instruction'].strip()}", f"Application/website: {app} ({s['os']})", "Steps:"]
-    lines += [f"{k + 1}. {a}" for k, a in enumerate(acts) if a]
+def render(session: dict, actions: list[str]) -> str:
+    """A session as the judge sees it: instruction, application, numbered steps."""
+    application = session["app"].split(":", 1)[-1]
+    lines = [
+        f"Instruction: {session['instruction'].strip()}",
+        f"Application/website: {application} ({session['os']})",
+        "Steps:",
+    ]
+    lines += [f"{number + 1}. {action}" for number, action in enumerate(actions) if action]
     return "\n".join(lines)
 
 
-def build_pool(data_keys, sessions, idx, ev_docs, k_key, k_action, k_app, seed):
-    """Unordered candidate pairs within the split, with the retrievers that proposed them."""
-    rng = random.Random(seed)
-    idx = np.asarray(idx)
-    K = data_keys[idx]
-    S = K @ K.T
-    np.fill_diagonal(S, -np.inf)
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    A = TfidfVectorizer(ngram_range=(1, 3), token_pattern=r"\S+", min_df=1, sublinear_tf=True).fit_transform(
-        [ev_docs[i] for i in idx])
-    SA = (A @ A.T).toarray()
-    np.fill_diagonal(SA, -np.inf)
-    by_app = collections.defaultdict(list)
-    by_group = collections.defaultdict(list)
-    for i in idx:
-        by_app[sessions[i]["app"]].append(int(i))
-        by_group[sessions[i]["group"]].append(int(i))
-    pairs = collections.defaultdict(set)
-
-    def add(a, b, src):
-        if a != b:
-            pairs[(min(a, b), max(a, b))].add(src)
-
-    for qi, q in enumerate(idx):
-        q = int(q)
-        for j in np.argsort(-S[qi])[:k_key]:
-            add(q, int(idx[j]), "key")
-        for j in np.argsort(-SA[qi])[:k_action]:
-            add(q, int(idx[j]), "action")
-        same = [x for x in by_app[sessions[q]["app"]] if x != q]
-        for x in rng.sample(same, min(k_app, len(same))):
-            add(q, x, "app")
-        for x in by_group[sessions[q]["group"]]:
-            add(q, x, "dup")
-    return pairs
+def make_request(
+    first: dict, second: dict, first_actions: list[str], second_actions: list[str], rng: random.Random
+) -> dict:
+    """messages.create arguments for one pair; which session is shown as "A" is random."""
+    shown = [(first, first_actions), (second, second_actions)]
+    if rng.random() < 0.5:
+        shown.reverse()
+    prompt = f"Session A\n{render(*shown[0])}\n\nSession B\n{render(*shown[1])}"
+    return dict(
+        model=MODEL,
+        max_tokens=16000,
+        system=SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+        output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
+    )
 
 
-def make_request(sa, sb, acts_a, acts_b, rng):
-    first, second = (sa, acts_a), (sb, acts_b)
-    if rng.random() < 0.5:                      # randomize presentation order
-        first, second = second, first
-    user = f"Session A\n{render(*first)}\n\nSession B\n{render(*second)}"
-    return dict(model=MODEL, max_tokens=16000, system=SYSTEM,
-                messages=[{"role": "user", "content": user}],
-                output_config={"format": {"type": "json_schema", "schema": SCHEMA}})
+def build_requests(sessions: list[dict], pairs: list[Pair], rng: random.Random) -> dict[str, JudgeRequest]:
+    """Request id ("p<a>_<b>") -> request, in the order of pairs."""
+    traces = load_traces(sessions, sorted({session_index for pair in pairs for session_index in pair}))
+    return {
+        f"p{first}_{second}": JudgeRequest(
+            first, second, make_request(sessions[first], sessions[second], traces[first], traces[second], rng)
+        )
+        for first, second in pairs
+    }
 
 
-def parse_message(msg):
-    if msg.stop_reason == "refusal":
+def parse_message(message) -> dict | None:
+    """The judge's {"rationale", "label"}; None if it refused or returned no text."""
+    if message.stop_reason == "refusal":
         return None
-    text = next((b.text for b in msg.content if b.type == "text"), None)
+    text = next((block.text for block in message.content if block.type == "text"), None)
     if text is None:
         return None
     return json.loads(text)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--split", default="val")
-    ap.add_argument("--mode", choices=["dry", "sync", "batch", "collect"], default="dry")
-    ap.add_argument("--limit", type=int, default=0, help="judge only N random pairs (pilot)")
-    ap.add_argument("--k_key", type=int, default=4)
-    ap.add_argument("--k_action", type=int, default=2)
-    ap.add_argument("--k_app", type=int, default=1)
-    ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--batch_id", default="")
-    args = ap.parse_args()
+def token_usage(message) -> dict[str, int]:
+    return {"in": message.usage.input_tokens, "out": message.usage.output_tokens}
 
-    import pickle
 
-    with open(paths.PREP / "sessions.pkl", "rb") as f:
-        sessions = pickle.load(f)
-    keys = np.load(paths.SHARED / "keys.npy")
-    idx = [i for i, s in enumerate(sessions) if s["split"] == args.split]
-    out_path = paths.SHARED / f"judged_{args.split}.jsonl"
-    state_path = paths.SHARED / f"judged_{args.split}_batch.json"
+def usd(tokens: collections.Counter, usd_per_million_tokens: dict[str, int]) -> float:
+    return (tokens["in"] * usd_per_million_tokens["in"] + tokens["out"] * usd_per_million_tokens["out"]) / 1e6
 
-    done = set()
-    if out_path.exists():
-        for line in open(out_path):
-            r = json.loads(line)
-            done.add((r["a"], r["b"]))
 
-    ev = np.load(paths.PREP / "events.npz")
-    docs = action_docs({k: ev[k] for k in ev.files})
+# --------------------------------------------------------------------------------------------------- judging
+class JudgmentWriter:
+    """Appends one line per judged pair to judged_<split>.jsonl."""
 
-    pairs = build_pool(keys, sessions, idx, docs, args.k_key, args.k_action, args.k_app, args.seed)
-    todo = [p for p in sorted(pairs) if p not in done]
-    rng = random.Random(args.seed)
-    if args.limit:
-        todo = rng.sample(todo, min(args.limit, len(todo)))
-    src_counts = collections.Counter(s for p in pairs for s in pairs[p])
-    print(f"{args.split}: {len(idx)} sessions, {len(pairs)} pooled pairs ({dict(src_counts)}), "
-          f"{len(done)} already judged, {len(todo)} to judge", flush=True)
+    def __init__(self, judged_path: Path, pool: Pool):
+        self.judged_path, self.pool = judged_path, pool
 
-    need = sorted({i for p in todo for i in p})
-    traces = load_traces(sessions, need)
-    reqs = {f"p{a}_{b}": (a, b, make_request(sessions[a], sessions[b], traces[a], traces[b], rng)) for a, b in todo}
-    est_in = sum(len(r[2]["system"]) + len(r[2]["messages"][0]["content"]) for r in reqs.values()) / 3.5
-    print(f"~{est_in / 1e6:.2f}M input tokens (chars/3.5 estimate)", flush=True)
-    if args.mode == "dry":
-        for cid, (a, b, r) in list(reqs.items())[:2]:
-            print("\n----", cid, pairs[(a, b)], "\n" + r["messages"][0]["content"][:1500])
-        return
+    def write(self, first: int, second: int, judgment: dict, usage: dict[str, int]) -> None:
+        with open(self.judged_path, "a") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "a": first,
+                        "b": second,
+                        "label": judgment["label"],
+                        "rationale": judgment["rationale"],
+                        "sources": sorted(self.pool[(first, second)]),
+                        "usage": usage,
+                    }
+                )
+                + "\n"
+            )
 
-    import anthropic
-    client = anthropic.Anthropic()
 
-    def write(a, b, res, usage):
-        with open(out_path, "a") as f:
-            f.write(json.dumps({"a": a, "b": b, "label": res["label"], "rationale": res["rationale"],
-                                "sources": sorted(pairs[(a, b)]), "usage": usage}) + "\n")
+def judge_synchronously(client, requests: dict[str, JudgeRequest], writer: JudgmentWriter, workers: int) -> None:
+    def judge(request: JudgeRequest) -> tuple[JudgeRequest, dict | None, dict[str, int]]:
+        message = client.messages.create(**request.params)
+        return request, parse_message(message), token_usage(message)
 
-    if args.mode == "sync":
-        tot = collections.Counter()
+    tokens: collections.Counter = collections.Counter()
+    with ThreadPoolExecutor(workers) as executor:
+        for request, judgment, usage in executor.map(judge, requests.values()):
+            tokens.update(usage)
+            if judgment is not None:
+                writer.write(request.first, request.second, judgment, usage)
+    pair_count = max(len(requests), 1)
+    cost = usd(tokens, STANDARD_USD_PER_MILLION_TOKENS)
+    print(
+        f"judged {len(requests)} pairs: {tokens['in'] / pair_count:.0f} in / {tokens['out'] / pair_count:.0f} out "
+        f"tokens per pair; ${cost:.3f} at standard price (${cost / pair_count * 1000:.2f} per 1K pairs; "
+        f"batch = half)"
+    )
 
-        def one(item):
-            cid, (a, b, r) = item
-            msg = client.messages.create(**r)
-            return a, b, parse_message(msg), {"in": msg.usage.input_tokens, "out": msg.usage.output_tokens}
 
-        with ThreadPoolExecutor(args.workers) as pool:
-            for a, b, res, usage in pool.map(one, reqs.items()):
-                tot.update(usage)
-                if res is not None:
-                    write(a, b, res, usage)
-        n = max(len(reqs), 1)
-        cost = (tot["in"] * 4 + tot["out"] * 20) / 1e6
-        print(f"judged {len(reqs)} pairs: {tot['in'] / n:.0f} in / {tot['out'] / n:.0f} out tokens per pair; "
-              f"${cost:.3f} at standard price (${cost / n * 1000:.2f} per 1K pairs; batch = half)")
-        return
-
+def submit_batch(client, requests: dict[str, JudgeRequest], batch_state_path: Path) -> str:
+    """Submits the requests as one Message Batch and records its id for --mode collect."""
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
     from anthropic.types.messages.batch_create_params import Request
-    if args.mode == "batch":
-        batch = client.messages.batches.create(requests=[
-            Request(custom_id=cid, params=MessageCreateParamsNonStreaming(**r)) for cid, (_, _, r) in reqs.items()])
-        json.dump({"batch_id": batch.id, "n": len(reqs)}, open(state_path, "w"))
-        print("submitted batch", batch.id, flush=True)
-        bid = batch.id
-    else:
-        bid = args.batch_id or json.load(open(state_path))["batch_id"]
+
+    batch = client.messages.batches.create(
+        requests=[
+            Request(custom_id=request_id, params=MessageCreateParamsNonStreaming(**request.params))
+            for request_id, request in requests.items()
+        ]
+    )
+    batch_state_path.write_text(json.dumps({"batch_id": batch.id, "n": len(requests)}))
+    print("submitted batch", batch.id, flush=True)
+    return batch.id
+
+
+def collect_batch(client, batch_id: str, writer: JudgmentWriter) -> None:
+    """Waits for the batch to end, then writes its judgments."""
     while True:
-        b = client.messages.batches.retrieve(bid)
-        if b.processing_status == "ended":
+        batch = client.messages.batches.retrieve(batch_id)
+        if batch.processing_status == "ended":
             break
-        print(f"{b.processing_status}: {b.request_counts}", flush=True)
-        time.sleep(120)
-    tot, bad = collections.Counter(), 0
-    for res in client.messages.batches.results(bid):
-        a, b_ = (int(x) for x in res.custom_id[1:].split("_"))
-        if res.result.type != "succeeded":
-            bad += 1
+        print(f"{batch.processing_status}: {batch.request_counts}", flush=True)
+        time.sleep(BATCH_POLL_SECONDS)
+
+    tokens: collections.Counter = collections.Counter()
+    failed = 0
+    for entry in client.messages.batches.results(batch_id):
+        first, second = (int(index) for index in entry.custom_id[1:].split("_"))
+        if entry.result.type != "succeeded":
+            failed += 1
             continue
-        msg = res.result.message
-        parsed = parse_message(msg)
-        usage = {"in": msg.usage.input_tokens, "out": msg.usage.output_tokens}
-        tot.update(usage)
-        if parsed is None:
-            bad += 1
+        message = entry.result.message
+        judgment = parse_message(message)
+        usage = token_usage(message)
+        tokens.update(usage)
+        if judgment is None:
+            failed += 1
             continue
-        write(a, b_, parsed, usage)
-    cost = (tot["in"] * 2 + tot["out"] * 10) / 1e6
-    print(f"collected; {bad} failed; ~${cost:.2f} at batch price")
+        writer.write(first, second, judgment, usage)
+    print(f"collected; {failed} failed; ~${usd(tokens, BATCH_USD_PER_MILLION_TOKENS):.2f} at batch price")
 
 
 if __name__ == "__main__":

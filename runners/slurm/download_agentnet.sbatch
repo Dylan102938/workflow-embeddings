@@ -6,8 +6,8 @@
 #SBATCH --mem=32G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
-# Download AgentNet (xlangai/AgentNet) to NAS, then merge each split zip into one archive.
-# The training pipeline reads screenshots straight out of the merged zips (no 450K small files on NFS).
+# Download AgentNet (xlangai/AgentNet) to NAS. The split image zips are read in place by wfemb/prep/splitzip.py
+# (no merged copy, no 450K small files on NFS).
 set -euo pipefail
 DATA=${DATA:-/nas/ucb/dfeng/data/workflow-embeddings}
 RAW=$DATA/agentnet_raw

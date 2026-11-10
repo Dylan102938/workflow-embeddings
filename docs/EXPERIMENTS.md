@@ -1,50 +1,66 @@
-# Experiments: variables, run ids, metrics, results layout
+# Experiments: variables, run ids, results, metrics
 
-This is the contract between the training code (`wfemb/`), the run queue (`jobs.txt`), the launchers (`runners/`), the
-local
-results tree (`results/`) and the dashboard (`dashboard/`). Definitions live in code in `wfemb/config.py`
-(variables, ids) and `wfemb/metrics.py` (metrics).
+The contract between the training code (`wfemb/`), the run queue (`jobs.txt`), the launchers (`runners/`), the
+results tree (`results/`) and the dashboard (`dashboard/`). The code side is `wfemb/config.py` (variables, ids,
+recipe) and `wfemb/metrics.py` (metrics). How the model and training work: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Experiment variables
 
-A run is defined by these variables only. Everything else is the fixed recipe of the best model so far
-(`TrainConfig` / `EvalConfig` / `DataConfig` in `wfemb/config.py`); it is recorded in each run's `config.json` but does
-not define a distinct experiment.
+A run is defined by these variables only (`config.Experiment`). Each has a short key, used only in run ids.
 
-| key | name | default (best model) | meaning |
+| id key | field | best model | meaning |
 |---|---|---|---|
-| `arch` | architecture | `late-history-transf` | what the final block does (see below) |
-| `dm` | d_model | `512` | model width (screen, event and history tokens all live in it) |
-| `dh` | d_head | `64` | attention head width |
-| `nl` | n_layers | `4` | blocks, including the final block |
-| `nh` | n_heads | `8` | attention heads per block |
-| `drop` | dropout | `0.3` | dropout on attention/MLP outputs and on the state |
-| `smooth` | label smoothing | `0.2` | eps of the similarity-based label smoothing (training only) |
-| `patch` | n_patches | `576` | screen patch tokens per frame: 256 = 16x16 grid, 576 = 24x24 grid (frozen SigLIP2 so400m, channel PCA 1152 -> 512) |
-| `lr` | learning rate | `5e-4` | peak AdamW lr (500 warmup steps, cosine decay to 0) |
-| `bs` | batch size | `64` | sessions per batch (very long sessions split a batch, see `train.max_frames`) |
-| `ep` | epochs | `45` | passes over the training sessions |
-| `beta` | hard-negative beta | `0` | negatives weighted by exp(beta * cos(target key, negative key)), normalized to mean 1; beta ramps in linearly over the first 30% of training |
-| `seed` | seed | `0` | torch / numpy seed (init, batch order, dropout, paraphrase draws) |
+| `arch` | `architecture` | `late-history-transf` | `transf`, `late-history-transf` or `gru`: what the final block does ([ARCHITECTURE.md](ARCHITECTURE.md)) |
+| `dm` | `d_model` | `512` | model width |
+| `dh` | `d_head` | `64` | attention head width |
+| `nl` | `n_layers` | `4` | blocks, including the final block |
+| `nh` | `n_heads` | `8` | attention heads per block |
+| `drop` | `dropout` | `0.3` | dropout on attention and MLP outputs and on the state |
+| `smooth` | `label_smoothing` | `0.2` | share of the target probability spread over similar instructions (training only) |
+| `patch` | `n_patches` | `576` | screen tokens per frame: 256 (16x16 grid) or 576 (24x24 grid) |
+| `lr` | `learning_rate` | `5e-4` | peak learning rate |
+| `bs` | `batch_size` | `64` | sessions per batch |
+| `ep` | `n_epochs` | `45` | passes over the training sessions |
+| `beta` | `hard_negative_beta` | `0` | strength of hard-negative weighting (0 = off) |
+| `seed` | `seed` | `0` | seed of initialization, batch order, dropout and paraphrase draws |
 
-To ablate a recipe setting, add it as a variable: register it in `wfemb/config.py:Experiment` before `seed`, with the
-default that reproduces earlier runs, document it here (marked *added*), and move existing result folders with
-`python -m wfemb.storage.results migrate` (it re-derives every path from the run's `config.json`). A variable whose
-alternatives turn out no better than the best model is removed again, with its code. Removed so far: the near-duplicate
-mask threshold (off was no better than 0.8; fixed at `train.dupmask = 0.8`) and per-token-type Q/K/V projections
-(`sep-q` was worse than shared projections).
+Everything else is the fixed recipe, shared by all runs: `TrainConfig`, `EvalConfig` and `DataConfig` in
+`wfemb/config.py`. It is recorded in each run's `config.json` but is not part of the id.
 
-### Architectures
+| recipe field | value | meaning |
+|---|---|---|
+| `train.weight_decay` | 0.1 | AdamW, on matrices only (not biases, norms, embedding tables) |
+| `train.warmup_steps` | 500 | linear warmup, then cosine decay to 0 |
+| `train.grad_clip` | 1.0 | gradient norm clip |
+| `train.ema_decay` | 0.999 | the EMA of the weights is what is evaluated and checkpointed |
+| `train.screen_token_dropout` | 0.4 | fraction of a frame's screen tokens dropped in training |
+| `train.step_dropout` | 0.4 | each step but the last is dropped with this probability in training |
+| `train.smoothing_temperature` | 0.05 | temperature of the label-smoothing distribution |
+| `train.hard_negative_ramp` | 0.3 | beta rises linearly from 0 over this fraction of training |
+| `train.duplicate_threshold` | 0.8 | candidates with cosine above this to the target are not used as negatives |
+| `train.confidence_min / max / init` | 1 / 50 / 5 | range and initial value of the confidence |
+| `train.max_frames_per_batch` | 2048 | a batch with more sessions x steps is split |
+| `train.activation_checkpointing` | on | same results, less GPU memory, about 30% slower |
+| `eval.eval_steps` | 500 | validation interval |
+| `eval.duplicate_threshold` | 0.8 | as in training; fixed so metrics compare across runs |
+| `eval.n_neighbors` | 100 | neighbors in `avg_log_dist_100NN` |
+| `data.label_set` | `keys_openai` | OpenAI text-embedding-3-large keys of instructions and paraphrases |
 
-Every step t is one transformer pass over `[screen patch tokens | one token per input event | history token]` (no causal
-mask; padding masks only). The model's state h_t is read from the history position; the heads map it to a unit
-direction d_t in the frozen 3072-d text-key space and a confidence kappa_t.
+Adding a variable (to ablate a recipe setting): add the field to `Experiment` and its key to `ID_KEYS` before `seed`,
+with the default that reproduces earlier runs; document it here; move existing result folders with
+`python -m wfemb.storage.results migrate`. A variable whose alternatives are no better than the best model is removed
+again, together with its code and the results that used it. Removed so far: turning the near-duplicate mask off, and
+separate Q/K/V projections per token type.
 
-- `transf`: the history token h_{t-1} takes part in every block.
-- `late-history-transf`: the first `nl - 1` blocks see only the step's screen and event tokens (they run for all frames
-  in parallel); h_{t-1} joins in the last block, which computes only the history row.
-- `gru`: `nl - 1` transformer blocks with the history token in every block, then a GRU cell as the final block:
-  h_t = LayerNorm(GRU(LayerNorm(output at the history position), h_{t-1})).
+## Command line
+
+```
+python -m wfemb.train id=<run id>                                      # a run by its id
+python -m wfemb.train experiment.hard_negative_beta=2 experiment.seed=1   # the best model with changes
+python -m wfemb.train id=<run id> train.max_steps=200 results_root=/tmp/r # any recipe field can be overridden
+python -m wfemb.eval id=<run id> [split=val] [finalize=True]
+python -m wfemb.config id=<run id>                                     # canonical id, results folder, frame cache
+```
 
 ## Run ids
 
@@ -66,12 +82,12 @@ Every run writes raw data only (no summaries; the dashboard computes those) to
 
 | file | kind | content |
 |---|---|---|
-| `config.json` | json | `{"id", "experiment": {...}, "train": {...}, "eval": {...}, "data": {...}, "meta": {...}}` (meta: git commit, host, launcher, start time, n_params, steps_per_epoch, total_steps; `legacy` / `legacy_name` for imported pre-refactor runs) |
+| `config.json` | json | `{"id", "experiment": {...}, "train": {...}, "eval": {...}, "data": {...}, "model": {...}, "meta": {...}}` (meta: git commit, host, launcher, start time, n_params, steps_per_epoch, total_steps; `legacy` / `legacy_name` for imported pre-refactor runs) |
 | `steps.jsonl` | jsonl, one row per training step | `step, epoch, time, loss, rigid_loss, avg_dist, lr, grad_norm, beta, data_s, step_s` |
 | `evals.jsonl` | jsonl, one row every `eval_steps` (and at the last step) | `step, epoch, time, val_loss, val_r@1, val_r@5, val_avg_log_dist_100NN, val_judged_r@1, val_judged_r@5, val_judged_ndcg@10, max_mem_gb` |
 | `final.json` | json, written once at the end | `best_step, selected_on` and every `val_*` / `test_*` metric at the chosen checkpoint, `train_minutes` |
-| `test_embeddings.npz` | npz, written once at the end | every test step's direction d (fp16) and confidence kappa at the chosen checkpoint (format: `wfemb/eval.py`); the demo is built from it (~360 MB, downloaded with `--emb`) |
-| `best.pt`, `last.pt` | checkpoints | model (EMA) weights + config; not downloaded by default |
+| `test_embeddings.npz` | npz, written once at the end | every test step's direction (float16) and confidence at the chosen checkpoint: `session_indices`, `step_offsets`, `lengths` (one entry per session) and `directions`, `confidences` (one row per step; session i owns rows `step_offsets[i]` to `step_offsets[i] + lengths[i] - 1`). The demo is built from it. About 360 MB; fetched with `--embeddings` |
+| `best.pt`, `last.pt` | checkpoints | EMA weights and the model configuration; fetched with `--checkpoints` |
 
 `time` is seconds since the run started. A run without `final.json` is still running (or died). The results root is
 `$WFEMB_RESULTS`, default `<repo>/results` (gitignored). Runs on rnn write to `$WFEMB_DATA/results`, runs on Baseten to
@@ -81,18 +97,21 @@ the job's checkpoint directory; `python -m wfemb.storage.fetch rnn|baseten` copi
 
 `jobs.txt` (repo root) lists every run by id, in named sections; one section is one launch (a Baseten job, or one
 rnn submission packed onto GPUs). Format: `[section]` lines, then one `<run id> [overrides]` per line, `#` comments.
-`python -m wfemb.storage.jobs list` shows each run's status; the dashboard's Queue view shows the same.
+`python -m wfemb.storage.jobs list` shows each run's status; the dashboard's Queue view shows the same. Launching a
+section: `WFEMB_JOB=<section> WFEMB_GPUS=2 truss train push runners/baseten/train_config.py --job-name <section>` on
+Baseten, `runners/slurm/submit.sh <section>` on rnn. A run that already has `final.json` is not rerun. If a run
+trained fully but lost its final evaluation, `python -m wfemb.eval id=<run id> finalize=True` redoes it
+(`runners/baseten/evaluate.sh` does this on Baseten).
 
 ## Metrics (wfemb/metrics.py)
 
-Notation: a session's workflow embedding e is its direction at its last step, d_T. Distances are cosine distances
-1 - cos. Candidates in training are the keys of all N training instructions; in evaluation, the training keys plus the
+A session's workflow embedding is its direction at its last step. Distances are cosine distances, 1 - cos. Candidates in training are the keys of all N training instructions; in evaluation, the training keys plus the
 evaluated split's keys (val/test instructions never occur in training).
 
-- `loss`: the optimized objective on the batch. Per step t: cross-entropy of softmax(kappa_t * cos(d_t, key_j)) over
-  the candidates (each shown with a random wording: the instruction or one of its paraphrases), false negatives
-  (same instruction group, or cos > 0.8 to the target) removed, label-smoothed target (`smooth`), hard-negative
-  weights (`beta`). Averaged over a session's steps, then over sessions.
+- `loss`: the optimized objective on the batch. Per step: cross-entropy of softmax(confidence * cos(direction, key))
+  over the candidates (each shown with a random wording: the instruction or one of its paraphrases), false negatives
+  (same instruction group, or cosine above 0.8 to the target) removed, label-smoothed target, hard-negative weights.
+  Averaged over a session's steps, then over sessions.
 - `rigid_loss`: the same forward pass and batch scored with a one-hot target: no label smoothing and no hard-negative
   weights (so it means the same in every run; with beta = 0 it is exactly the training loss without smoothing).
 - `avg_dist`: mean distance between each session's workflow embedding and the instruction keys of the other sessions in

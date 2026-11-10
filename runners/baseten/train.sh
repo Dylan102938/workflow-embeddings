@@ -45,12 +45,15 @@ for l in "${RUNS[@]}"; do
     python - "${l%% *}" <<'PY'
 import json, sys
 from pathlib import Path
-from wfemb.config import Experiment, default_results
-exp = Experiment.from_id(sys.argv[1])
-f = Path(default_results()) / exp.path / "final.json"
-keep = ("best_step", "val_loss", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_100NN", "test_judged_r@5")
-res = {k: v for k, v in json.loads(f.read_text()).items() if k in keep} if f.exists() else {"error": "no final.json"}
-print("RESULT", json.dumps({"id": exp.id, **res}), flush=True)
+from wfemb.config import Experiment, default_results_root
+experiment = Experiment.from_id(sys.argv[1])
+final_path = Path(default_results_root()) / experiment.relative_dir / "final.json"
+shown = ("best_step", "val_loss", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_100NN", "test_judged_r@5")
+if final_path.exists():
+    result = {name: value for name, value in json.loads(final_path.read_text()).items() if name in shown}
+else:
+    result = {"error": "no final.json"}
+print("RESULT", json.dumps({"id": experiment.id, **result}), flush=True)
 PY
 done
 echo "TRAIN_DONE fail=$fail"; exit $fail

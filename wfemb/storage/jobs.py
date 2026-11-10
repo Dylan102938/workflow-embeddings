@@ -1,8 +1,9 @@
-"""The run queue: jobs.txt at the repo root, run ids grouped into named sections (format in its header).
+"""The run queue, jobs.txt: run ids grouped into named sections (format: docs/EXPERIMENTS.md).
 
-  python -m wfemb.storage.jobs list                # every section: its runs and their status in the results tree
-  python -m wfemb.storage.jobs runs <section>      # the section's "<id> [overrides]" lines (used by the launchers)
+python -m wfemb.storage.jobs list              # every section's runs and their status
+python -m wfemb.storage.jobs runs <section>    # "<run id> [overrides]" lines, read by the launchers
 """
+
 from __future__ import annotations
 
 import argparse
@@ -12,68 +13,80 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..config import REPO, Experiment, default_results
+from ..config import REPO, Experiment, default_results_root
 
-JOBS = Path(os.environ.get("WFEMB_JOBS", REPO / "jobs.txt"))       # WFEMB_JOBS: another queue file (tests)
-SECTION = re.compile(r"^\[([A-Za-z0-9_.-]+)\]$")
+JOBS_FILE = Path(os.environ.get("WFEMB_JOBS", REPO / "jobs.txt"))
+SECTION_HEADER = re.compile(r"^\[([A-Za-z0-9_.-]+)\]$")
+
+
+@dataclass
+class QueuedRun:
+    run_id: str
+    overrides: list[str]
 
 
 @dataclass
 class Section:
     name: str
-    notes: list[str] = field(default_factory=list)          # comment lines
-    runs: list[tuple[str, list[str]]] = field(default_factory=list)   # (canonical id, overrides)
+    notes: list[str] = field(default_factory=list)
+    runs: list[QueuedRun] = field(default_factory=list)
 
 
-def parse(path: Path = JOBS) -> dict[str, Section]:
-    """Sections in file order. Raises ValueError (with the line number) on a bad id or a run outside a section."""
+def parse_jobs(path: Path = JOBS_FILE) -> dict[str, Section]:
+    """Sections in file order. Raises ValueError naming the line of a bad id or a run outside a section."""
     sections: dict[str, Section] = {}
-    cur = None
-    for ln, raw in enumerate(Path(path).read_text().splitlines(), 1):
-        body, _, comment = raw.partition("#")
-        body = body.strip()
-        if m := SECTION.match(body):
-            if m.group(1) in sections:
-                raise ValueError(f"{path}:{ln}: section [{m.group(1)}] defined twice")
-            cur = sections[m.group(1)] = Section(m.group(1))
-            continue
-        if not body:
-            if cur is not None and comment.strip():
-                cur.notes.append(comment.strip())
-            continue
-        if cur is None:
-            raise ValueError(f"{path}:{ln}: run outside a section")
-        rid, *overrides = body.split()
-        try:
-            exp = Experiment.from_id(rid)
-        except Exception as e:
-            raise ValueError(f"{path}:{ln}: {e}") from None
-        if bad := [o for o in overrides if "=" not in o]:
-            raise ValueError(f"{path}:{ln}: overrides need key=value: {bad}")
-        cur.runs.append((exp.id, overrides))
+    current = None
+    for line_number, line in enumerate(Path(path).read_text().splitlines(), 1):
+        content, _, comment = line.partition("#")
+        content, comment = content.strip(), comment.strip()
+        where = f"{path}:{line_number}"
+        if header := SECTION_HEADER.match(content):
+            name = header.group(1)
+            if name in sections:
+                raise ValueError(f"{where}: section [{name}] defined twice")
+            current = sections[name] = Section(name)
+        elif not content:
+            if current is not None and comment:
+                current.notes.append(comment)
+        elif current is None:
+            raise ValueError(f"{where}: run outside a section")
+        else:
+            run_id, *overrides = content.split()
+            try:
+                run_id = Experiment.from_id(run_id).id
+            except Exception as error:
+                raise ValueError(f"{where}: {error}") from None
+            if any("=" not in override for override in overrides):
+                raise ValueError(f"{where}: overrides must be key=value")
+            current.runs.append(QueuedRun(run_id, overrides))
     return sections
 
 
+def run_status(run_id: str, results_root: Path) -> str:
+    run_dir = results_root / Experiment.from_id(run_id).relative_dir
+    if (run_dir / "final.json").exists():
+        return "done"
+    return "started" if (run_dir / "config.json").exists() else "-"
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["list", "runs"])
-    ap.add_argument("section", nargs="?")
-    ap.add_argument("--file", default=str(JOBS))
-    a = ap.parse_args()
-    sections = parse(Path(a.file))
-    if a.cmd == "runs":
-        if a.section not in sections:
-            sys.exit(f"no section [{a.section}] in {a.file} (have: {', '.join(sections)})")
-        for rid, ov in sections[a.section].runs:
-            print(" ".join([rid, *ov]))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["list", "runs"])
+    parser.add_argument("section", nargs="?")
+    parser.add_argument("--file", default=str(JOBS_FILE))
+    arguments = parser.parse_args()
+    sections = parse_jobs(Path(arguments.file))
+    if arguments.command == "runs":
+        if arguments.section not in sections:
+            sys.exit(f"no section [{arguments.section}] in {arguments.file} (have: {', '.join(sections)})")
+        for run in sections[arguments.section].runs:
+            print(" ".join([run.run_id, *run.overrides]))
         return
-    root = Path(default_results())
-    for s in sections.values():
-        print(f"[{s.name}]")
-        for rid, ov in s.runs:
-            d = root / Experiment.from_id(rid).path
-            st = "done" if (d / "final.json").exists() else "started" if (d / "config.json").exists() else "-"
-            print(f"  {st:8s} {rid} {' '.join(ov)}")
+    results_root = Path(default_results_root())
+    for section in sections.values():
+        print(f"[{section.name}]")
+        for run in section.runs:
+            print(f"  {run_status(run.run_id, results_root):8s} {run.run_id} {' '.join(run.overrides)}")
 
 
 if __name__ == "__main__":

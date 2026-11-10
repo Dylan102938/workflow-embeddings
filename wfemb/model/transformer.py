@@ -1,19 +1,8 @@
-"""The workflow encoder: a per-step transformer over [screen patch tokens | event tokens | history token].
+"""The workflow encoder: a per-step transformer over [screen tokens | event tokens | history token].
 
-At step t the sequence holds every screen patch token of the step's screenshot (frozen SigLIP2 features projected to
-d_model, + patch position and type embeddings), every input event of the step as its own token (+ its order within the
-step), and one history token carrying the state h_{t-1}. No causal mask: a step only ever sees its own screen, its own
-events and the state from earlier steps (the target instruction is never an input). Masks are padding masks only (empty
-event slots); screen-token dropout in training removes tokens.
-
-The state h_t is read at the history position; heads map it to a unit direction d_t in the frozen text-key space and a
-confidence kappa_t (inverse temperature of the InfoNCE softmax). arch (what the final block does):
-  transf               the history token takes part in every block
-  late-history-transf  blocks 0..nl-2 see only screen + event tokens (they do not depend on the state, so they run for
-                       all frames of the batch in parallel); the history token joins in the last block
-  gru                  nl-1 transformer blocks with the history token in every block, then a GRU cell (model/gru.py)
-The last transformer block computes only the history row (no other output is used).
+Design and the three architectures: docs/ARCHITECTURE.md.
 """
+
 from __future__ import annotations
 
 import math
@@ -27,161 +16,193 @@ from torch.utils.checkpoint import checkpoint
 from .events import EventEncoder
 from .gru import GRUHead
 
-SCREEN, EVENT, HIST = 0, 1, 2
+SCREEN, EVENT, HISTORY = 0, 1, 2  # rows of the token-type embedding
 
 
 @dataclass
 class ModelConfig:
-    arch: str
-    d: int                   # d_model
+    architecture: str
+    d_model: int
     d_head: int
-    n_layers: int            # blocks including the final block (for gru: nl - 1 transformer blocks + the GRU)
+    n_layers: int
     n_heads: int
     dropout: float
-    d_key: int               # frozen label (text-key) dimension
-    d_vis: int               # frozen screen-feature dimension
-    n_tok: int               # screen patch tokens per frame
-    n_key_tokens: int        # key-token vocabulary size
-    d_text: int              # typed-text embedding dimension
-    e_max: int               # event slots per step
-    tok_drop: float = 0.0    # training-time fraction of screen tokens dropped
+    d_label: int  # dimension of the frozen instruction keys
+    d_screen: int  # dimension of the frozen screen features
+    n_patches: int
+    n_key_tokens: int
+    d_text: int  # dimension of the frozen typed-text embeddings
+    max_events: int  # event slots per step
+    screen_token_dropout: float = 0.0
     mlp_ratio: int = 4
-    k_min: float = 1.0
-    k_max: float = 50.0
-    k_init: float = 5.0
-    checkpointing: bool = True
+    confidence_min: float = 1.0
+    confidence_max: float = 50.0
+    confidence_init: float = 5.0
+    activation_checkpointing: bool = True
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         return asdict(self)
 
 
-class XBlock(nn.Module):
-    """Pre-LN transformer block: multi-head attention + MLP."""
+class TransformerBlock(nn.Module):
+    """Pre-norm block: multi-head self-attention, then an MLP."""
 
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, config: ModelConfig):
         super().__init__()
-        d, dh, nh = cfg.d, cfg.d_head, cfg.n_heads
-        self.nh, self.dh = nh, dh
-        self.wq, self.wk, self.wv = nn.Linear(d, nh * dh), nn.Linear(d, nh * dh), nn.Linear(d, nh * dh)
-        self.wo = nn.Linear(nh * dh, d)
-        self.ln1, self.ln2 = nn.LayerNorm(d), nn.LayerNorm(d)
-        self.mlp = nn.Sequential(nn.Linear(d, cfg.mlp_ratio * d), nn.GELU(), nn.Linear(cfg.mlp_ratio * d, d))
-        self.drop = nn.Dropout(cfg.dropout)
+        d_model, d_attention = config.d_model, config.n_heads * config.d_head
+        self.n_heads, self.d_head = config.n_heads, config.d_head
+        self.query = nn.Linear(d_model, d_attention)
+        self.key = nn.Linear(d_model, d_attention)
+        self.value = nn.Linear(d_model, d_attention)
+        self.output = nn.Linear(d_attention, d_model)
+        self.attention_norm = nn.LayerNorm(d_model)
+        self.mlp_norm = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, config.mlp_ratio * d_model), nn.GELU(), nn.Linear(config.mlp_ratio * d_model, d_model)
+        )
+        self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x, key_mask=None, last_only=False):
-        """x [N, L, d] -> [N, L, d], or [N, 1, d] (the last token only). key_mask [N, L] bool, True = attend."""
-        N, L, _ = x.shape
-        y = self.ln1(x)
-        k = self.wk(y).view(N, L, self.nh, self.dh).transpose(1, 2)
-        v = self.wv(y).view(N, L, self.nh, self.dh).transpose(1, 2)
-        if last_only:
-            q, x = self.wq(y[:, -1:]), x[:, -1:]
-        else:
-            q = self.wq(y)
-        Lq = q.shape[1]
-        q = q.view(N, Lq, self.nh, self.dh).transpose(1, 2)
-        o = F.scaled_dot_product_attention(q, k, v, attn_mask=None if key_mask is None else key_mask[:, None, None, :])
-        x = x + self.drop(self.wo(o.transpose(1, 2).reshape(N, Lq, -1)))
-        return x + self.drop(self.mlp(self.ln2(x)))
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        return x.view(x.shape[0], x.shape[1], self.n_heads, self.d_head).transpose(1, 2)
+
+    def forward(
+        self, tokens: torch.Tensor, attend_mask: torch.Tensor | None = None, last_token_only: bool = False
+    ) -> torch.Tensor:
+        """tokens [N, L, d_model]; attend_mask [N, L] (True = may be attended to).
+
+        Returns [N, L, d_model], or [N, 1, d_model] when only the last token's output is needed.
+        """
+        normed = self.attention_norm(tokens)
+        keys, values = self._split_heads(self.key(normed)), self._split_heads(self.value(normed))
+        if last_token_only:
+            normed, tokens = normed[:, -1:], tokens[:, -1:]
+        queries = self._split_heads(self.query(normed))
+        mask = None if attend_mask is None else attend_mask[:, None, None, :]
+        attended = F.scaled_dot_product_attention(queries, keys, values, attn_mask=mask)
+        attended = attended.transpose(1, 2).reshape(tokens.shape[0], tokens.shape[1], -1)
+        tokens = tokens + self.dropout(self.output(attended))
+        return tokens + self.dropout(self.mlp(self.mlp_norm(tokens)))
 
 
 class WorkflowTransformer(nn.Module):
-    def __init__(self, cfg: ModelConfig, text_table: torch.Tensor):
+    def __init__(self, config: ModelConfig, text_embeddings: torch.Tensor):
         super().__init__()
-        self.cfg = cfg
-        d = cfg.d
-        n_tf = cfg.n_layers - 1 if cfg.arch == "gru" else cfg.n_layers
-        self.h_join = n_tf - 1 if cfg.arch == "late-history-transf" else 0   # first block with the history token
-        self.register_buffer("text_table", text_table.to(torch.float16), persistent=False)
-        self.event_enc = EventEncoder(d, cfg.n_key_tokens, cfg.d_text)
-        self.no_event = nn.Parameter(torch.randn(d) * 0.02)           # token of a step without events
-        self.ev_pos = nn.Parameter(torch.randn(cfg.e_max, d) * 0.02)  # order of an event within its step
-        self.scr_norm = nn.LayerNorm(cfg.d_vis)
-        self.scr_proj = nn.Linear(cfg.d_vis, d)
-        self.scr_pos = nn.Parameter(torch.randn(cfg.n_tok, d) * 0.02)
-        self.type_emb = nn.Parameter(torch.randn(3, d) * 0.02)
-        self.blocks = nn.ModuleList([XBlock(cfg) for _ in range(n_tf)])
-        self.h0 = nn.Parameter(torch.zeros(d))
-        if cfg.arch == "gru":
-            self.gru = GRUHead(d)
+        self.config = config
+        d_model = config.d_model
+        n_blocks = config.n_layers - 1 if config.architecture == "gru" else config.n_layers
+        # Blocks before this index see only screen and event tokens, so they run for all steps at once.
+        self.first_block_with_history = n_blocks - 1 if config.architecture == "late-history-transf" else 0
+
+        self.register_buffer("text_embeddings", text_embeddings.to(torch.float16), persistent=False)
+        self.event_encoder = EventEncoder(d_model, config.n_key_tokens, config.d_text)
+        self.no_event_token = nn.Parameter(torch.randn(d_model) * 0.02)
+        self.event_positions = nn.Parameter(torch.randn(config.max_events, d_model) * 0.02)
+        self.screen_norm = nn.LayerNorm(config.d_screen)
+        self.screen_projection = nn.Linear(config.d_screen, d_model)
+        self.screen_positions = nn.Parameter(torch.randn(config.n_patches, d_model) * 0.02)
+        self.token_type_embedding = nn.Parameter(torch.randn(3, d_model) * 0.02)
+
+        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(n_blocks)])
+        self.initial_state = nn.Parameter(torch.zeros(d_model))
+        if config.architecture == "gru":
+            self.gru = GRUHead(d_model)
         else:
-            self.h_norm = nn.LayerNorm(d)
-        self.drop = nn.Dropout(cfg.dropout)
-        self.dir_head = nn.Linear(d, cfg.d_key)
-        self.conf_head = nn.Linear(d, 1)
+            self.state_norm = nn.LayerNorm(d_model)
+
+        self.dropout = nn.Dropout(config.dropout)
+        self.direction_head = nn.Linear(d_model, config.d_label)
+        self.confidence_head = nn.Linear(d_model, 1)
         self._init_weights()
 
     def _init_weights(self):
-        resid = 0.02 / math.sqrt(2 * len(self.blocks))                   # GPT-2 style residual scaling
-        for blk in self.blocks:
-            for m in blk.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, std=0.02)
-                    nn.init.zeros_(m.bias)
-            nn.init.normal_(blk.wo.weight, std=resid)
-            nn.init.normal_(blk.mlp[-1].weight, std=resid)
-        nn.init.zeros_(self.conf_head.weight)
-        nn.init.constant_(self.conf_head.bias, math.log(math.expm1(self.cfg.k_init - self.cfg.k_min)))
+        residual_std = 0.02 / math.sqrt(2 * len(self.blocks))
+        for block in self.blocks:
+            for module in block.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.normal_(module.weight, std=0.02)
+                    nn.init.zeros_(module.bias)
+            nn.init.normal_(block.output.weight, std=residual_std)
+            nn.init.normal_(block.mlp[-1].weight, std=residual_std)
+        config = self.config
+        nn.init.zeros_(self.confidence_head.weight)
+        nn.init.constant_(
+            self.confidence_head.bias, math.log(math.expm1(config.confidence_init - config.confidence_min))
+        )
 
-    def _block(self, blk, x, mask, last_only=False):
-        if self.cfg.checkpointing and self.training and torch.is_grad_enabled():
-            return checkpoint(blk, x, mask, last_only, use_reentrant=False)
-        return blk(x, mask, last_only)
+    def _run_block(self, block, tokens, attend_mask, last_token_only=False):
+        if self.config.activation_checkpointing and self.training and torch.is_grad_enabled():
+            return checkpoint(block, tokens, attend_mask, last_token_only, use_reentrant=False)
+        return block(tokens, attend_mask, last_token_only)
 
-    def tokens(self, b):
-        """State-independent tokens of every frame: x [B*T, n_s + E, d] and the key mask."""
-        cfg = self.cfg
-        B, T = b.valid.shape
-        N = B * T
-        xs = b.frames.reshape(N, *b.frames.shape[2:])
-        n_s = xs.shape[1]
-        pos = self.scr_pos[:n_s]
-        if self.training and cfg.tok_drop > 0:                           # screen-token dropout = fewer tokens
-            keep = max(1, int(round(n_s * (1 - cfg.tok_drop))))
-            idx = torch.rand(N, n_s, device=xs.device).argsort(1)[:, :keep]
-            xs = xs.gather(1, idx[..., None].expand(-1, -1, xs.shape[-1]))
-            pos = pos[idx]
-            n_s = keep
-        xs = self.scr_proj(self.scr_norm(xs)) + pos + self.type_emb[SCREEN]
-        ev, present = self.event_enc(b.ev_type, b.ev_xy, b.ev_scroll, b.ev_keys, b.ev_text, self.text_table)
-        E = ev.shape[2]                                                  # [B, T, E, d], [B, T, E]
-        slot0 = torch.zeros_like(present)
-        slot0[..., 0] = True
-        empty = (~present.any(-1, keepdim=True)) & slot0                # no events: slot 0 holds the no-event token
-        ev = torch.where(empty[..., None], self.no_event.to(ev.dtype), ev)
-        present = present | empty
-        xe = (ev + self.ev_pos[:E] + self.type_emb[EVENT]).reshape(N, E, -1)
-        x = torch.cat([xs, xe.to(xs.dtype)], 1)
-        mask = torch.cat([torch.ones(N, n_s, dtype=torch.bool, device=x.device), present.reshape(N, E)], 1)
-        return x, mask
+    def screen_tokens(self, batch) -> torch.Tensor:
+        """[B * T, n_screen_tokens, d_model]; in training a random subset of each frame's patches is kept."""
+        features = batch.frames.flatten(0, 1)
+        n_frames, n_patches, _ = features.shape
+        positions = self.screen_positions[:n_patches]
+        if self.training and self.config.screen_token_dropout > 0:
+            n_kept = max(1, int(round(n_patches * (1 - self.config.screen_token_dropout))))
+            kept = torch.rand(n_frames, n_patches, device=features.device).argsort(1)[:, :n_kept]
+            features = features.gather(1, kept[..., None].expand(-1, -1, features.shape[-1]))
+            positions = positions[kept]
+        return self.screen_projection(self.screen_norm(features)) + positions + self.token_type_embedding[SCREEN]
 
-    def heads(self, h):
-        k = (F.softplus(self.conf_head(h).float()) + self.cfg.k_min).clamp(max=self.cfg.k_max)
-        return F.normalize(self.dir_head(h).float(), dim=-1), k
+    def event_tokens(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """[B * T, E, d_model] and the mask [B * T, E] of slots that hold a token.
 
-    def forward(self, b):
-        """Batch -> d [B, T, D_key] unit directions (fp32), kappa [B, T, 1]. The state is frozen after a session
-        ends (padded steps repeat its last output)."""
-        B, T = b.valid.shape
-        x, mask = self.tokens(b)
-        j = self.h_join
-        for blk in self.blocks[:j]:                                     # parallel over all B*T frames
-            x = self._block(blk, x, mask)
-        L0, dt = x.shape[1], x.dtype
-        xt = x.view(B, T, L0, -1).unbind(1)          # unbind, not [:, t]: one stacked gradient instead of T copies
-        mt = mask.view(B, T, L0).unbind(1)
-        val = b.valid.unbind(1)
-        seq = self.blocks[j:]
-        one = torch.ones(B, 1, dtype=torch.bool, device=x.device)
-        h = self.h0.expand(B, -1).float()
-        hs = []
-        for t in range(T):
-            X = torch.cat([xt[t], (h + self.type_emb[HIST]).to(dt)[:, None]], 1)
-            m = torch.cat([mt[t], one], 1)
-            for i, blk in enumerate(seq):
-                X = self._block(blk, X, m, last_only=i == len(seq) - 1)
-            out = X[:, -1]
-            h_new = self.gru(out, h) if self.cfg.arch == "gru" else self.h_norm(out).float()
-            h = torch.where(val[t][:, None], h_new, h)
-            hs.append(h)
-        return self.heads(self.drop(torch.stack(hs, 1)))
+        A step without events gets the no-event token in slot 0.
+        """
+        tokens, is_present = self.event_encoder(batch, self.text_embeddings)
+        first_slot = torch.zeros_like(is_present)
+        first_slot[..., 0] = True
+        is_placeholder = ~is_present.any(-1, keepdim=True) & first_slot
+        tokens = torch.where(is_placeholder[..., None], self.no_event_token.to(tokens.dtype), tokens)
+        tokens = tokens + self.event_positions[: tokens.shape[2]] + self.token_type_embedding[EVENT]
+        return tokens.flatten(0, 1), (is_present | is_placeholder).flatten(0, 1)
+
+    def step_tokens(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Every step's screen and event tokens [B * T, L, d_model] and their attend mask [B * T, L]."""
+        screen = self.screen_tokens(batch)
+        events, event_mask = self.event_tokens(batch)
+        screen_mask = torch.ones(screen.shape[:2], dtype=torch.bool, device=screen.device)
+        return torch.cat([screen, events.to(screen.dtype)], 1), torch.cat([screen_mask, event_mask], 1)
+
+    def heads(self, states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        directions = F.normalize(self.direction_head(states).float(), dim=-1)
+        confidences = F.softplus(self.confidence_head(states).float()) + self.config.confidence_min
+        return directions, confidences.clamp(max=self.config.confidence_max)
+
+    def forward(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Batch -> unit directions [B, T, d_label] and confidences [B, T, 1], both float32.
+
+        After a session's last step its state is frozen, so padded steps repeat its final output.
+        """
+        batch_size, n_steps = batch.valid.shape
+        tokens, attend_mask = self.step_tokens(batch)
+        for block in self.blocks[: self.first_block_with_history]:
+            tokens = self._run_block(block, tokens, attend_mask)
+
+        # unbind (rather than indexing [:, t] in the loop) keeps one stacked gradient instead of one per step
+        tokens_by_step = tokens.view(batch_size, n_steps, *tokens.shape[1:]).unbind(1)
+        masks_by_step = attend_mask.view(batch_size, n_steps, -1).unbind(1)
+        valid_by_step = batch.valid.unbind(1)
+        history_blocks = self.blocks[self.first_block_with_history :]
+        history_mask = torch.ones(batch_size, 1, dtype=torch.bool, device=tokens.device)
+        history_type = self.token_type_embedding[HISTORY]
+
+        state = self.initial_state.expand(batch_size, -1).float()
+        states = []
+        for step in range(n_steps):
+            history_token = (state + history_type).to(tokens.dtype)[:, None]
+            sequence = torch.cat([tokens_by_step[step], history_token], 1)
+            sequence_mask = torch.cat([masks_by_step[step], history_mask], 1)
+            for index, block in enumerate(history_blocks):
+                is_last = index == len(history_blocks) - 1
+                sequence = self._run_block(block, sequence, sequence_mask, last_token_only=is_last)
+            block_output = sequence[:, -1]
+            if self.config.architecture == "gru":
+                new_state = self.gru(block_output, state)
+            else:
+                new_state = self.state_norm(block_output).float()
+            state = torch.where(valid_by_step[step][:, None], new_state, state)
+            states.append(state)
+        return self.heads(self.dropout(torch.stack(states, 1)))

@@ -1,1 +1,1 @@
-"""Workflow demo: exports bundles that the dashboard's Demo tab (Intent Replay viewer) plays. See export.py."""
+"""Builds the bundles that the dashboard's Demo tab (the Intent Replay viewer) plays: docs/DEMO.md."""

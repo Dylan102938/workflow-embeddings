@@ -18,8 +18,8 @@ dependencies = [
     "chz==0.4.0",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest>=8"]
+[dependency-groups]
+dev = ["pytest>=8", "ruff==0.14.4"]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,3 +35,18 @@ torch = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
 name = "pytorch-cu121"
 url = "https://download.pytorch.org/whl/cu121"
 explicit = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["results", "legacy_runs", "dashboard/bundles"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "B008",   # chz entry points declare config defaults in the signature
+    "B905",   # zip() without strict=
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["wfemb"]

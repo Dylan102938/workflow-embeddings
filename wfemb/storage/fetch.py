@@ -1,16 +1,10 @@
-"""Copy run results (raw data) from where jobs ran into the local results tree (default ./results, gitignored).
+"""Copies run results from rnn or Baseten into the local results tree.
 
-  python -m wfemb.storage.fetch rnn                    # rsync rnn:$WFEMB_DATA/results (json/jsonl only)
-  python -m wfemb.storage.fetch baseten                # every job of the Baseten training project "wfemb"
-  python -m wfemb.storage.fetch baseten --job q9gge93  # one job
-  ... --emb                                            # also test_embeddings.npz (the demo's input, ~360 MB/run)
-  ... --ckpt                                           # also the checkpoints (best.pt, last.pt)
-  ... --screens                                        # Baseten: the test screenshot cache (demo_screens.tar)
-
-Baseten jobs leave their results tree in the job's checkpoint directory (runners/baseten/train.sh), and demo jobs their
-bundles (runners/baseten/demo.sh, -> dashboard/bundles/); `truss train get_checkpoint_urls` lists those files with
-download URLs.
+  python -m wfemb.storage.fetch rnn
+  python -m wfemb.storage.fetch baseten [--job <job id>]
+Options: --embeddings (test_embeddings.npz), --checkpoints (*.pt), --screenshots (Baseten demo screenshot cache).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,95 +16,123 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from ..config import REPO, default_results
+from ..config import REPO, default_results_root
 from . import paths
 
 RNN_RESULTS = "rnn:/nas/ucb/dfeng/data/workflow-embeddings/results/"
 BASETEN_PROJECT = "wfemb"
+BUNDLES_DIR = REPO / "dashboard" / "bundles"
+SCREENSHOTS_ARCHIVE = "demo_screens.tar"
 
 
-def fetch_rnn(root: Path, ckpt: bool, emb: bool = False, src: str = RNN_RESULTS):
-    inc = (["--include=*/", "--include=*.json", "--include=*.jsonl"] + (["--include=*.pt"] if ckpt else [])
-           + (["--include=*_embeddings.npz"] if emb else []))
-    cmd = ["rsync", "-a", "--prune-empty-dirs", *inc, "--exclude=*", src, str(root) + "/"]
-    print(" ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True)
+def fetch_rnn(results_root: Path, checkpoints: bool, embeddings: bool):
+    patterns = ["*/", "*.json", "*.jsonl"]
+    if checkpoints:
+        patterns.append("*.pt")
+    if embeddings:
+        patterns.append("*_embeddings.npz")
+    command = [
+        "rsync",
+        "-a",
+        "--prune-empty-dirs",
+        *[f"--include={pattern}" for pattern in patterns],
+        "--exclude=*",
+        RNN_RESULTS,
+        f"{results_root}/",
+    ]
+    print(" ".join(command), flush=True)
+    subprocess.run(command, check=True)
 
 
-def _api_key() -> str:
-    if os.environ.get("BASETEN_API_KEY"):
-        return os.environ["BASETEN_API_KEY"]
-    rc = configparser.ConfigParser()
-    rc.read(Path.home() / ".trussrc")
-    return rc["baseten"]["api_key"]
+def baseten_api(path: str):
+    api_key = os.environ.get("BASETEN_API_KEY")
+    if not api_key:
+        truss_config = configparser.ConfigParser()
+        truss_config.read(Path.home() / ".trussrc")
+        api_key = truss_config["baseten"]["api_key"]
+    request = urllib.request.Request(
+        f"https://api.baseten.co/v1{path}", headers={"Authorization": f"Api-Key {api_key}"}
+    )
+    return json.loads(urllib.request.urlopen(request, timeout=60).read())
 
 
-def _api(path: str):
-    req = urllib.request.Request("https://api.baseten.co/v1" + path, headers={"Authorization": "Api-Key " + _api_key()})
-    return json.loads(urllib.request.urlopen(req, timeout=60).read())
+def baseten_jobs() -> list[dict]:
+    projects = baseten_api("/training_projects")["training_projects"]
+    project_id = next(project["id"] for project in projects if project["name"] == BASETEN_PROJECT)
+    return baseten_api(f"/training_projects/{project_id}/jobs")["training_jobs"]
 
 
-def baseten_jobs(project: str = BASETEN_PROJECT) -> list[dict]:
-    projects = _api("/training_projects")
-    projects = projects.get("training_projects", projects)
-    pid = next(p["id"] for p in projects if p["name"] == project)
-    jobs = _api(f"/training_projects/{pid}/jobs")
-    return jobs.get("training_jobs", jobs)
+def baseten_job_files(job_id: str) -> list[dict]:
+    """Files a job left in its checkpoint directory: {"relative_file_name", "url", "size_bytes"} each."""
+    with tempfile.TemporaryDirectory() as workdir:
+        listing = subprocess.run(
+            ["truss", "train", "get_checkpoint_urls", "--job-id", job_id], cwd=workdir, capture_output=True, text=True
+        )
+        written = list(Path(workdir).glob("*.json"))
+        if listing.returncode or not written:
+            print(f"{job_id}: no file listing ({listing.stderr.strip()[-200:]})")
+            return []
+        return json.loads(written[0].read_text()).get("checkpoint_artifacts", [])
 
 
-def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None, emb: bool = False, screens: bool = False,
-                  bundles: Path = REPO / "dashboard" / "bundles"):
-    jobs = job_ids or [j["id"] for j in baseten_jobs() if j["current_status"].endswith(("COMPLETED", "RUNNING"))]
-    for jid in jobs:
-        with tempfile.TemporaryDirectory() as tmp:
-            r = subprocess.run(["truss", "train", "get_checkpoint_urls", "--job-id", jid], cwd=tmp,
-                               capture_output=True, text=True)
-            files = list(Path(tmp).glob("*.json"))
-            if r.returncode or not files:
-                print(f"{jid}: no checkpoint listing ({r.stderr.strip()[-200:]})")
+def download(url: str, destination: Path):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=300) as response, open(destination, "wb") as file:
+        while chunk := response.read(1 << 20):
+            file.write(chunk)
+
+
+def fetch_baseten(
+    results_root: Path, job_ids: list[str] | None, checkpoints: bool, embeddings: bool, screenshots: bool
+):
+    if not job_ids:
+        job_ids = [job["id"] for job in baseten_jobs() if job["current_status"].endswith(("COMPLETED", "RUNNING"))]
+    demo_dir = paths.DATA / "demo"
+
+    def local_path(name: str) -> Path | None:
+        if name.startswith("results/"):
+            wanted = (checkpoints or not name.endswith(".pt")) and (embeddings or not name.endswith(".npz"))
+            return results_root / name.removeprefix("results/") if wanted else None
+        if name.startswith("bundles/"):
+            return BUNDLES_DIR / name.removeprefix("bundles/")
+        if name == SCREENSHOTS_ARCHIVE and screenshots:
+            return demo_dir / name
+        return None
+
+    for job_id in job_ids:
+        n_downloaded = 0
+        for file in baseten_job_files(job_id):
+            destination = local_path(file["relative_file_name"])
+            if destination is None:
                 continue
-            arts = json.loads(files[0].read_text()).get("checkpoint_artifacts", [])
-        n_new = 0
-        for a in arts:
-            rel = a["relative_file_name"]
-            if rel.startswith("results/") and (ckpt or not rel.endswith(".pt")) and (emb or not rel.endswith(".npz")):
-                dst = root / rel[len("results/"):]
-            elif rel == "demo_screens.tar" and screens:
-                dst = paths.DATA / "demo" / rel
-            elif rel.startswith("bundles/"):
-                dst = bundles / rel[len("bundles/"):]
-            else:
+            if destination.exists() and destination.stat().st_size == file.get("size_bytes"):
                 continue
-            if dst.exists() and dst.stat().st_size == a.get("size_bytes"):
-                continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(a["url"], timeout=300) as resp, open(dst, "wb") as f:
-                while chunk := resp.read(1 << 20):
-                    f.write(chunk)
-            n_new += 1
-        print(f"{jid}: {n_new} file(s) downloaded")
-        tar = paths.DATA / "demo" / "demo_screens.tar"
-        if screens and tar.exists():                             # -> DATA/demo/screens/<session id>/<step>.jpg
-            subprocess.run(["tar", "xf", str(tar), "-C", str(tar.parent)], check=True)
-            tar.unlink()
-            print(f"screenshots -> {tar.parent / 'screens'}")
+            download(file["url"], destination)
+            n_downloaded += 1
+        print(f"{job_id}: {n_downloaded} file(s) downloaded")
+
+    archive = demo_dir / SCREENSHOTS_ARCHIVE
+    if archive.exists():
+        subprocess.run(["tar", "xf", str(archive), "-C", str(demo_dir)], check=True)
+        archive.unlink()
+        print(f"screenshots -> {demo_dir / 'screens'}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("source", choices=["rnn", "baseten"])
-    ap.add_argument("--root", default=default_results())
-    ap.add_argument("--job", action="append", help="Baseten job id (repeatable; default: all jobs of the project)")
-    ap.add_argument("--ckpt", action="store_true", help="also download checkpoints")
-    ap.add_argument("--emb", action="store_true", help="also download test_embeddings.npz (demo input)")
-    ap.add_argument("--screens", action="store_true", help="Baseten: also the test screenshot cache")
-    a = ap.parse_args()
-    root = Path(a.root)
-    root.mkdir(parents=True, exist_ok=True)
-    if a.source == "rnn":
-        fetch_rnn(root, a.ckpt, a.emb)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("source", choices=["rnn", "baseten"])
+    parser.add_argument("--root", default=default_results_root())
+    parser.add_argument("--job", action="append", help="Baseten job id (repeatable; default: every job)")
+    parser.add_argument("--checkpoints", action="store_true")
+    parser.add_argument("--embeddings", action="store_true")
+    parser.add_argument("--screenshots", action="store_true")
+    arguments = parser.parse_args()
+    results_root = Path(arguments.root)
+    results_root.mkdir(parents=True, exist_ok=True)
+    if arguments.source == "rnn":
+        fetch_rnn(results_root, arguments.checkpoints, arguments.embeddings)
     else:
-        fetch_baseten(root, a.ckpt, a.job, a.emb, a.screens)
+        fetch_baseten(results_root, arguments.job, arguments.checkpoints, arguments.embeddings, arguments.screenshots)
 
 
 if __name__ == "__main__":

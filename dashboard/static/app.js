@@ -913,11 +913,11 @@ function renderDemo() {
   }
   const out = `${S.data.bundles_out || "dashboard/bundles"}/${target}`;
   const cmds = [
-    `python -m wfemb.storage.fetch baseten --emb    # or: rnn --emb  (the run's test_embeddings.npz)`,
+    `python -m wfemb.storage.fetch baseten --embeddings    # or: rnn --embeddings  (the run's test_embeddings.npz)`,
     `python -m wfemb.demo bundle --id ${target} --out ${out}`,
   ];
   msg.innerHTML = `<div class="howto"><h3>No demo bundle for this run yet</h3>
-    <p>The bundle is read from <code>${esc(root)}/${esc(target)}/</code>. It is built on this machine (CPU) from the run's <code>test_embeddings.npz</code>, which its final test evaluation wrote; screenshots come from the local screenshot cache (<code>fetch baseten --screens</code>, once):</p>
+    <p>The bundle is read from <code>${esc(root)}/${esc(target)}/</code>. It is built on this machine (CPU) from the run's <code>test_embeddings.npz</code>, which its final test evaluation wrote; screenshots come from the local screenshot cache (<code>fetch baseten --screenshots</code>, once):</p>
     ${cmds.map((c) => `<div class="cmd"><code>${esc(c)}</code>${copyBtn(c.replace(/\s+#.*$/, ""), "Copy command")}</div>`).join("")}
     <p class="muted">Bundles are found on the next refresh.</p></div>`;
 }

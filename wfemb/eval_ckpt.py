@@ -65,6 +65,8 @@ def main():
         state = torch.load(paths.RUNS / run / args.ckpt, map_location=device, weights_only=False)
         a = state["args"]
         paths.KEYS = Path(a["keys_dir"]) if a.get("keys_dir") else paths.SHARED
+        if not paths.KEYS.exists() and (paths.DATA / paths.KEYS.name).exists():   # e.g. evaluated off-cluster
+            paths.KEYS = paths.DATA / paths.KEYS.name
         extras = [x for x in a.get("extra", "").split(",") if x] + (["effect"] if a.get("use_effect") else [])
         key = (bool(a.get("use_crop")), tuple(extras), a.get("frames_dir"), a.get("avg_grid", 0), a.get("keys_dir"))
         if key != data_key:                      # reload frames only when the token layout changes

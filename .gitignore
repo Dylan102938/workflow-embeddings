@@ -226,3 +226,4 @@ runs/
 *.npz
 *.pt
 sweeps/groups/
+demo/bundle/

@@ -5,8 +5,9 @@
   python -m wfemb.storage.fetch baseten --job q9gge93  # one job
   ... --ckpt                                           # also the checkpoints (best.pt, last.pt)
 
-Baseten jobs leave their results tree in the job's checkpoint directory (runners/baseten/train.sh); `truss train
-get_checkpoint_urls` lists those files with download URLs.
+Baseten jobs leave their results tree in the job's checkpoint directory (runners/baseten/train.sh), and demo jobs their
+bundles (runners/baseten/demo.sh, -> dashboard/bundles/); `truss train get_checkpoint_urls` lists those files with
+download URLs.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from ..config import default_results
+from ..config import REPO, default_results
 
 RNN_RESULTS = "rnn:/nas/ucb/dfeng/data/workflow-embeddings/results/"
 BASETEN_PROJECT = "wfemb"
@@ -53,7 +54,8 @@ def baseten_jobs(project: str = BASETEN_PROJECT) -> list[dict]:
     return jobs.get("training_jobs", jobs)
 
 
-def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None):
+def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None,
+                  bundles: Path = REPO / "dashboard" / "bundles"):
     jobs = job_ids or [j["id"] for j in baseten_jobs() if j["current_status"].endswith(("COMPLETED", "RUNNING"))]
     for jid in jobs:
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,9 +69,12 @@ def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None):
         n_new = 0
         for a in arts:
             rel = a["relative_file_name"]
-            if not rel.startswith("results/") or (rel.endswith(".pt") and not ckpt):
+            if rel.startswith("results/") and (ckpt or not rel.endswith(".pt")):
+                dst = root / rel[len("results/"):]
+            elif rel.startswith("bundles/"):
+                dst = bundles / rel[len("bundles/"):]
+            else:
                 continue
-            dst = root / rel[len("results/"):]
             if dst.exists() and dst.stat().st_size == a.get("size_bytes"):
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)

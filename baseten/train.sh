@@ -24,7 +24,7 @@ for i in "${!RUNS[@]}"; do
     CUDA_VISIBLE_DEVICES=$(( i % NG )) python -m wfemb.train $line --frames_mode pread > "$log" 2>&1 &
     pids+=($!)
     (tail -n +1 -F "$log" 2>/dev/null | grep --line-buffered -E '"val_loss"|"final"|Traceback|Error|Timeout \(|total time' \
-        | cut -c1-400 | sed -u "s/^/[$name] /") &
+        | sed -u -e 's/^\(.\{400\}\).*$/\1/' -e "s/^/[$name] /") &      # sed -u: unbuffered (cut held lines back)
     tails+=($!)
     echo "launched $name on GPU $(( i % NG ))"; sleep 15
 done

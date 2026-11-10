@@ -1,6 +1,6 @@
 # Planned (first job on the refactored code). The best model with seed 2 on the new code (checks the refactor
-# against seeds 0 and 1 of the old code; also gives the new per-step metrics), per-token-type projections, width 768.
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_dupmask-0.8_qkv-shared_seed-2   # refactor check: seed 2 of the best model
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_dupmask-0.8_qkv-sep-q_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_dupmask-0.8_qkv-sep-qkv_seed-0
-arch-late-history-transf_dm-768_dh-64_nl-4_nh-12_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_dupmask-0.8_qkv-shared_seed-0
+# against seeds 0 and 1 of the old code; also gives the new per-step metrics), width 768, depth 6, dropout 0.1.
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-2   # refactor check: seed 2 of the best model
+arch-late-history-transf_dm-768_dh-64_nl-4_nh-12_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-6_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.1_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0

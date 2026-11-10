@@ -12,21 +12,18 @@ from make_synthetic import main as make_synthetic  # noqa: E402
 
 from wfemb.config import DataConfig, EvalConfig, Experiment, RunConfig, TrainConfig, fmt_value  # noqa: E402
 
-BEST = ("arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_"
-        "dupmask-0.8_qkv-shared_seed-0")
+BEST = "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0"
 
 
 def test_ids():
     assert Experiment().id == BEST
     assert str(Experiment().path) == BEST.replace("_", "/")
-    for e in (Experiment(beta=2, seed=1), Experiment(dupmask=None, arch="gru", lr=3e-4, drop=0.1, patch=256),
-              Experiment(lr=1.5e-3, smooth=0.0, qkv="sep-qkv")):
+    for e in (Experiment(beta=2, seed=1), Experiment(arch="gru", lr=3e-4, drop=0.1, patch=256),
+              Experiment(lr=1.5e-3, smooth=0.0, nl=6)):
         assert Experiment.from_id(e.id) == e
         assert Experiment.from_id(str(e.path)) == e
-    assert [fmt_value(v) for v in (5e-4, 1.5e-3, 0.3, 2.0, 0.0, None)] == ["5e-4", "1.5e-3", "0.3", "2", "0", "off"]
-    # an id from before the added variables parses with their defaults
-    assert Experiment.from_id(BEST.replace("_dupmask-0.8_qkv-shared", "")) == Experiment()
-    for bad in ("arch-foo", "dm512", "arch-gru_nl-1", "patch-300"):
+    assert [fmt_value(v) for v in (5e-4, 1.5e-3, 0.3, 2.0, 0.0)] == ["5e-4", "1.5e-3", "0.3", "2", "0"]
+    for bad in ("arch-foo", "dm512", "arch-gru_nl-1", "patch-300", BEST.replace("_seed", "_qkv-shared_seed")):
         with pytest.raises(Exception):
             Experiment.from_id(bad)
 
@@ -41,11 +38,10 @@ def synth(tmp_path_factory):
 SMALL = dict(dm=64, dh=16, nh=4, nl=2, patch=16, bs=16, ep=2, lr=1e-3)
 
 
-@pytest.mark.parametrize("arch,beta,dupmask,qkv", [("late-history-transf", 2.0, 0.8, "shared"),
-                                                    ("transf", 0.0, None, "sep-qkv"), ("gru", 0.0, 0.8, "sep-q")])
-def test_train_end_to_end(synth, tmp_path, arch, beta, dupmask, qkv):
+@pytest.mark.parametrize("arch,beta", [("late-history-transf", 2.0), ("transf", 0.0), ("gru", 0.0)])
+def test_train_end_to_end(synth, tmp_path, arch, beta):
     from wfemb.train import training_loop
-    exp = Experiment(arch=arch, beta=beta, dupmask=dupmask, qkv=qkv, **SMALL)
+    exp = Experiment(arch=arch, beta=beta, **SMALL)
     cfg = RunConfig(exp=exp, train=TrainConfig(max_steps=24, warmup=5),
                     eval=EvalConfig(eval_steps=10, knn=20),
                     data=DataConfig(root=str(synth), bulk=str(synth / "bulk")), results=str(tmp_path))

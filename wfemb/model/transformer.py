@@ -13,7 +13,6 @@ confidence kappa_t (inverse temperature of the InfoNCE softmax). arch (what the 
                        all frames of the batch in parallel); the history token joins in the last block
   gru                  nl-1 transformer blocks with the history token in every block, then a GRU cell (model/gru.py)
 The last transformer block computes only the history row (no other output is used).
-qkv (projections per token type: screen, event, history): shared | sep-q (W_Q) | sep-qkv (W_Q, W_K, W_V).
 """
 from __future__ import annotations
 
@@ -39,7 +38,6 @@ class ModelConfig:
     n_layers: int            # blocks including the final block (for gru: nl - 1 transformer blocks + the GRU)
     n_heads: int
     dropout: float
-    qkv: str
     d_key: int               # frozen label (text-key) dimension
     d_vis: int               # frozen screen-feature dimension
     n_tok: int               # screen patch tokens per frame
@@ -58,44 +56,28 @@ class ModelConfig:
 
 
 class XBlock(nn.Module):
-    """Pre-LN transformer block (multi-head attention + MLP) with optional per-token-type Q/K/V projections."""
+    """Pre-LN transformer block: multi-head attention + MLP."""
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         d, dh, nh = cfg.d, cfg.d_head, cfg.n_heads
         self.nh, self.dh = nh, dh
-        n_q = 3 if cfg.qkv in ("sep-q", "sep-qkv") else 1
-        n_kv = 3 if cfg.qkv == "sep-qkv" else 1
-        self.wq = nn.ModuleList([nn.Linear(d, nh * dh) for _ in range(n_q)])
-        self.wk = nn.ModuleList([nn.Linear(d, nh * dh) for _ in range(n_kv)])
-        self.wv = nn.ModuleList([nn.Linear(d, nh * dh) for _ in range(n_kv)])
+        self.wq, self.wk, self.wv = nn.Linear(d, nh * dh), nn.Linear(d, nh * dh), nn.Linear(d, nh * dh)
         self.wo = nn.Linear(nh * dh, d)
         self.ln1, self.ln2 = nn.LayerNorm(d), nn.LayerNorm(d)
         self.mlp = nn.Sequential(nn.Linear(d, cfg.mlp_ratio * d), nn.GELU(), nn.Linear(cfg.mlp_ratio * d, d))
         self.drop = nn.Dropout(cfg.dropout)
 
-    @staticmethod
-    def _proj(ws, x, segs):
-        """x [N, L, d]; segs = [(type, length), ...] covering L in order; one weight per token type if len(ws) > 1."""
-        if len(ws) == 1:
-            return ws[0](x)
-        out, s = [], 0
-        for typ, n in segs:
-            out.append(ws[typ](x[:, s:s + n]))
-            s += n
-        return torch.cat(out, 1)
-
-    def forward(self, x, segs, key_mask=None, last_only=False):
+    def forward(self, x, key_mask=None, last_only=False):
         """x [N, L, d] -> [N, L, d], or [N, 1, d] (the last token only). key_mask [N, L] bool, True = attend."""
         N, L, _ = x.shape
         y = self.ln1(x)
-        k = self._proj(self.wk, y, segs).view(N, L, self.nh, self.dh).transpose(1, 2)
-        v = self._proj(self.wv, y, segs).view(N, L, self.nh, self.dh).transpose(1, 2)
+        k = self.wk(y).view(N, L, self.nh, self.dh).transpose(1, 2)
+        v = self.wv(y).view(N, L, self.nh, self.dh).transpose(1, 2)
         if last_only:
-            q = self.wq[segs[-1][0] if len(self.wq) > 1 else 0](y[:, -1:])
-            x = x[:, -1:]
+            q, x = self.wq(y[:, -1:]), x[:, -1:]
         else:
-            q = self._proj(self.wq, y, segs)
+            q = self.wq(y)
         Lq = q.shape[1]
         q = q.view(N, Lq, self.nh, self.dh).transpose(1, 2)
         o = F.scaled_dot_product_attention(q, k, v, attn_mask=None if key_mask is None else key_mask[:, None, None, :])
@@ -141,13 +123,13 @@ class WorkflowTransformer(nn.Module):
         nn.init.zeros_(self.conf_head.weight)
         nn.init.constant_(self.conf_head.bias, math.log(math.expm1(self.cfg.k_init - self.cfg.k_min)))
 
-    def _block(self, blk, x, segs, mask, last_only=False):
+    def _block(self, blk, x, mask, last_only=False):
         if self.cfg.checkpointing and self.training and torch.is_grad_enabled():
-            return checkpoint(blk, x, segs, mask, last_only, use_reentrant=False)
-        return blk(x, segs, mask, last_only)
+            return checkpoint(blk, x, mask, last_only, use_reentrant=False)
+        return blk(x, mask, last_only)
 
     def tokens(self, b):
-        """State-independent tokens of every frame: x [B*T, n_s + E, d], key mask, segments [(type, length)]."""
+        """State-independent tokens of every frame: x [B*T, n_s + E, d] and the key mask."""
         cfg = self.cfg
         B, T = b.valid.shape
         N = B * T
@@ -171,7 +153,7 @@ class WorkflowTransformer(nn.Module):
         xe = (ev + self.ev_pos[:E] + self.type_emb[EVENT]).reshape(N, E, -1)
         x = torch.cat([xs, xe.to(xs.dtype)], 1)
         mask = torch.cat([torch.ones(N, n_s, dtype=torch.bool, device=x.device), present.reshape(N, E)], 1)
-        return x, mask, [(SCREEN, n_s), (EVENT, E)]
+        return x, mask
 
     def heads(self, h):
         k = (F.softplus(self.conf_head(h).float()) + self.cfg.k_min).clamp(max=self.cfg.k_max)
@@ -181,16 +163,15 @@ class WorkflowTransformer(nn.Module):
         """Batch -> d [B, T, D_key] unit directions (fp32), kappa [B, T, 1]. The state is frozen after a session
         ends (padded steps repeat its last output)."""
         B, T = b.valid.shape
-        x, mask, segs = self.tokens(b)
+        x, mask = self.tokens(b)
         j = self.h_join
         for blk in self.blocks[:j]:                                     # parallel over all B*T frames
-            x = self._block(blk, x, segs, mask)
+            x = self._block(blk, x, mask)
         L0, dt = x.shape[1], x.dtype
         xt = x.view(B, T, L0, -1).unbind(1)          # unbind, not [:, t]: one stacked gradient instead of T copies
         mt = mask.view(B, T, L0).unbind(1)
         val = b.valid.unbind(1)
         seq = self.blocks[j:]
-        segs_h = segs + [(HIST, 1)]
         one = torch.ones(B, 1, dtype=torch.bool, device=x.device)
         h = self.h0.expand(B, -1).float()
         hs = []
@@ -198,7 +179,7 @@ class WorkflowTransformer(nn.Module):
             X = torch.cat([xt[t], (h + self.type_emb[HIST]).to(dt)[:, None]], 1)
             m = torch.cat([mt[t], one], 1)
             for i, blk in enumerate(seq):
-                X = self._block(blk, X, segs_h, m, last_only=i == len(seq) - 1)
+                X = self._block(blk, X, m, last_only=i == len(seq) - 1)
             out = X[:, -1]
             h_new = self.gru(out, h) if self.cfg.arch == "gru" else self.h_norm(out).float()
             h = torch.where(val[t][:, None], h_new, h)

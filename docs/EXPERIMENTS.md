@@ -24,13 +24,14 @@ not define a distinct experiment.
 | `bs` | batch size | `64` | sessions per batch (very long sessions split a batch, see `train.max_frames`) |
 | `ep` | epochs | `45` | passes over the training sessions |
 | `beta` | hard-negative beta | `0` | negatives weighted by exp(beta * cos(target key, negative key)), normalized to mean 1; beta ramps in linearly over the first 30% of training |
-| `dupmask` | *added* near-duplicate mask | `0.8` | training: candidates with cos(target key, key) > dupmask are removed from the softmax (same-instruction groups always are). `off` = only exact-duplicate groups. Added for the "no near-duplicate masking" ablation. |
-| `qkv` | *added* per-token-type projections | `shared` | `shared` (standard), `sep-q` (W_Q per token type), `sep-qkv` (W_Q, W_K, W_V per token type). Token types: screen, event, history. Added for the per-type W_Q/W_K/W_V ablation. |
 | `seed` | seed | `0` | torch / numpy seed (init, batch order, dropout, paraphrase draws) |
 
-Added variables (marked *added*) go before `seed` in the order above. A new one is registered in
-`wfemb/config.py:Experiment` with the default that reproduces earlier runs, documented here, and existing result folders
-are moved with `python -m wfemb.storage.results migrate` (it re-derives every path from the run's `config.json`).
+To ablate a recipe setting, add it as a variable: register it in `wfemb/config.py:Experiment` before `seed`, with the
+default that reproduces earlier runs, document it here (marked *added*), and move existing result folders with
+`python -m wfemb.storage.results migrate` (it re-derives every path from the run's `config.json`). A variable whose
+alternatives turn out no better than the best model is removed again, with its code. Removed so far: the near-duplicate
+mask threshold (off was no better than 0.8; fixed at `train.dupmask = 0.8`) and per-token-type Q/K/V projections
+(`sep-q` was worse than shared projections).
 
 ### Architectures
 
@@ -46,13 +47,13 @@ direction d_t in the frozen 3072-d text-key space and a confidence kappa_t.
 
 ## Run ids
 
-`arch-<v>_dm-<v>_dh-<v>_nl-<v>_nh-<v>_drop-<v>_smooth-<v>_patch-<v>_lr-<v>_bs-<v>_ep-<v>_beta-<v>_dupmask-<v>_qkv-<v>_seed-<v>`
+`arch-<v>_dm-<v>_dh-<v>_nl-<v>_nh-<v>_drop-<v>_smooth-<v>_patch-<v>_lr-<v>_bs-<v>_ep-<v>_beta-<v>_seed-<v>`
 
 Values never contain `_`; a key is everything before the first `-` of a segment. Numbers are canonical: integers as
 integers (`beta-0`, `beta-2`), floats below 0.01 in short scientific form (`lr-5e-4`, `lr-1.5e-3`), other floats with
 `%g` (`drop-0.3`). `wfemb.config.Experiment.id` / `Experiment.from_id` round-trip exactly. The best model so far is
 
-`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_dupmask-0.8_qkv-shared_seed-0`
+`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0`
 
 Results are always reported and named with these ids.
 
@@ -60,7 +61,7 @@ Results are always reported and named with these ids.
 
 Every run writes raw data only (no summaries; the dashboard computes those) to
 `<results root>/<one folder per id segment>/`, e.g.
-`results/arch-late-history-transf/dm-512/dh-64/nl-4/nh-8/drop-0.3/smooth-0.2/patch-576/lr-5e-4/bs-64/ep-45/beta-0/dupmask-0.8/qkv-shared/seed-0/`:
+`results/arch-late-history-transf/dm-512/dh-64/nl-4/nh-8/drop-0.3/smooth-0.2/patch-576/lr-5e-4/bs-64/ep-45/beta-0/seed-0/`:
 
 | file | kind | content |
 |---|---|---|
@@ -82,7 +83,7 @@ evaluated split's keys (val/test instructions never occur in training).
 
 - `loss`: the optimized objective on the batch. Per step t: cross-entropy of softmax(kappa_t * cos(d_t, key_j)) over
   the candidates (each shown with a random wording: the instruction or one of its paraphrases), false negatives
-  (same instruction group, or cos > dupmask to the target) removed, label-smoothed target (`smooth`), hard-negative
+  (same instruction group, or cos > 0.8 to the target) removed, label-smoothed target (`smooth`), hard-negative
   weights (`beta`). Averaged over a session's steps, then over sessions.
 - `rigid_loss`: the same forward pass and batch scored with a one-hot target: no label smoothing and no hard-negative
   weights (so it means the same in every run; with beta = 0 it is exactly the training loss without smoothing).

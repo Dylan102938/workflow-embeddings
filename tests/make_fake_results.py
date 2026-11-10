@@ -4,7 +4,7 @@
     python dashboard/server.py --results OUT_DIR/results --jobs OUT_DIR/jobs
 
 13 runs: the default config with seeds 0-2, arch transf (2 seeds) and gru, d_model 384 (2 seeds), dropout 0.1,
-qkv sep-q, beta 2 still running (no final.json, files touched now), a run that died (stale: no final.json, files two
+n_layers 6, beta 2 still running (no final.json, files touched now), a run that died (stale: no final.json, files two
 days old), and one imported legacy run (meta.legacy, steps.jsonl every 50 steps, no rigid_loss / avg_dist /
 *_avg_log_dist_100NN). Curves: training loss ~9 -> ~3 with noise, val_loss with its minimum around step 6000.
 Standard library only.
@@ -22,7 +22,7 @@ from pathlib import Path
 
 VARS = [  # key, default (docs/EXPERIMENTS.md order)
     ("arch", "late-history-transf"), ("dm", 512), ("dh", 64), ("nl", 4), ("nh", 8), ("drop", 0.3), ("smooth", 0.2),
-    ("patch", 576), ("lr", 5e-4), ("bs", 64), ("ep", 45), ("beta", 0), ("dupmask", 0.8), ("qkv", "shared"), ("seed", 0),
+    ("patch", 576), ("lr", 5e-4), ("bs", 64), ("ep", 45), ("beta", 0), ("seed", 0),
 ]
 
 
@@ -48,7 +48,7 @@ RUNS = [
     ({"arch": "gru"}, 0.35, "done"),
     ({"dm": 384}, 0.08, "done"), ({"dm": 384, "seed": 1}, 0.08, "done"),
     ({"drop": 0.1}, 0.20, "done"),
-    ({"qkv": "sep-q"}, 0.04, "done"),
+    ({"nl": 6}, 0.04, "done"),
     ({"beta": 2}, -0.03, "running"),
     ({"lr": 1.5e-3}, 0.25, "stale"),
     ({"dm": 384, "drop": 0.1}, 0.15, "legacy"),
@@ -150,7 +150,7 @@ def main():
             "data": {"root": "/nas/ucb/dfeng/data/workflow-embeddings", "keys": "keys_openai", "frames": "",
                      "prefetch_threads": 4, "prefetch_depth": 4},
             "model": {"d_model": exp["dm"], "n_layers": exp["nl"], "n_heads": exp["nh"], "d_head": exp["dh"],
-                      "qkv": exp["qkv"], "dropout": exp["drop"], "d_key": 3072},
+                      "dropout": exp["drop"], "d_key": 3072},
             "meta": meta,
         }
         (d / "config.json").write_text(json.dumps(cfg, indent=2))
@@ -176,13 +176,13 @@ def main():
     jobs = out / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     default = {k: v for k, v in VARS}
-    todo = [run_id(default | {"arch": "gru", "seed": 1}), run_id(default | {"nl": 6}), run_id(default | {"dupmask": "off"}),
-            run_id(default | {"qkv": "sep-qkv"})]
+    todo = [run_id(default | {"arch": "gru", "seed": 1}), run_id(default | {"nl": 8}), run_id(default | {"bs": 128}),
+            run_id(default | {"dh": 128, "nh": 4})]
     (jobs / "r26.txt").write_text(
-        "# Round 26 (fake): architecture and per-type projections.\n"
+        "# Round 26 (fake): architecture and depth.\n"
         "# Same recipe as the best model; 24x24 SigLIP2 frames.\n\n"
         + "\n".join(ids[:6]) + "\n"
-        + ids[9] + "   # per-type W_Q\n"
+        + ids[9] + "   # depth 6\n"
         + todo[3] + " train.max_frames=2048\n"
         + todo[0] + "\n"
         + "\n# hard negatives\n"

@@ -20,13 +20,10 @@ import chz
 
 REPO = Path(__file__).resolve().parent.parent
 ARCHS = ("transf", "late-history-transf", "gru")
-QKV_MODES = ("shared", "sep-q", "sep-qkv")
 
 
 def fmt_value(v) -> str:
-    """Canonical text of a variable's value in a run id: 512, 0.3, 5e-4, 2 (for 2.0), off (for None)."""
-    if v is None:
-        return "off"
+    """Canonical text of a variable's value in a run id: 512, 0.3, 5e-4, 2 (for 2.0)."""
     if isinstance(v, str):
         if "_" in v:
             raise ValueError(f"id values cannot contain '_': {v!r}")
@@ -43,8 +40,8 @@ def fmt_value(v) -> str:
 
 @chz.chz
 class Experiment:
-    """The variables that define a run. Defaults = the best model so far. Field order = order in the id; variables
-    added beyond the original list (dupmask, qkv) come before seed."""
+    """The variables that define a run. Defaults = the best model so far. Field order = order in the id. A variable
+    added later (to ablate a recipe setting) goes before seed, with the default that reproduces earlier runs."""
     arch: str = "late-history-transf"   # transf | late-history-transf | gru: what the final block does
     dm: int = 512                       # d_model
     dh: int = 64                        # d_head
@@ -57,16 +54,12 @@ class Experiment:
     bs: int = 64                        # batch size (sessions)
     ep: int = 45                        # epochs
     beta: float = 0.0                   # hard-negative beta (0 = off)
-    dupmask: float | None = 0.8         # added: training near-duplicate mask threshold (None = off, groups only)
-    qkv: str = "shared"                 # added: shared | sep-q | sep-qkv (per-token-type projections)
     seed: int = 0
 
     @chz.validate
     def _check(self):
         if self.arch not in ARCHS:
             raise ValueError(f"arch must be one of {ARCHS}, got {self.arch!r}")
-        if self.qkv not in QKV_MODES:
-            raise ValueError(f"qkv must be one of {QKV_MODES}, got {self.qkv!r}")
         if self.nl < (2 if self.arch != "transf" else 1):
             raise ValueError(f"arch {self.arch} needs nl >= 2")
         if math.isqrt(self.patch) ** 2 != self.patch:
@@ -109,9 +102,7 @@ class Experiment:
 
 
 def _parse(key: str, text: str):
-    if key == "dupmask":
-        return None if text == "off" else float(text)
-    typ = {"arch": str, "qkv": str, "drop": float, "smooth": float, "lr": float, "beta": float}.get(key, int)
+    typ = {"arch": str, "drop": float, "smooth": float, "lr": float, "beta": float}.get(key, int)
     return typ(text)
 
 
@@ -127,6 +118,8 @@ class TrainConfig:
     step_drop: float = 0.4              # each intermediate step dropped in training (the final screen is kept)
     smooth_tau: float = 0.05            # temperature of the label-smoothing distribution over similar keys
     hard_neg_ramp: float = 0.3          # beta ramps 0 -> beta over this fraction of training
+    dupmask: float = 0.8                # false negatives: candidates with cos(target key, key) > dupmask are removed
+                                        # from the softmax (same-instruction groups always are)
     k_min: float = 1.0                  # confidence kappa = softplus(.) + k_min, clamped to k_max
     k_max: float = 50.0
     k_init: float = 5.0

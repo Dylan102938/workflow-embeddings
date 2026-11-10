@@ -41,7 +41,7 @@ STATIC = HERE / "static"
 # The best model so far (read from docs/EXPERIMENTS.md at startup; this is the fallback). Only used to order variables and
 # to mark the segments of an id that differ from it; every run's variables come from its own folder path.
 REFERENCE_ID = ("arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45"
-                "_beta-0_dupmask-0.8_qkv-shared_seed-0")
+                "_beta-0_seed-0")
 DOC_REF = re.compile(r"best model so far is\s*`([^`]+)`")
 
 

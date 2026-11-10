@@ -54,7 +54,7 @@ def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experi
     Update
       1. forward: d [B, T, D] (unit direction per step) and kappa [B, T, 1] (confidence per step)
       2. logits kappa_t * cos(d_t, w_j) over the N candidates, each column w_j a random wording of instruction j;
-         false negatives (same group, or cos(target key, key_j) > dupmask) masked out
+         false negatives (same group, or cos(target key, key_j) > train.dupmask) masked out
       3. loss: per-step cross-entropy against the label-smoothed target (smooth) with hard-negative weights (beta,
          ramped in), averaged over each session's valid steps, then over sessions
       4. backward, gradient clipping, AdamW step, EMA update, learning-rate schedule step
@@ -68,7 +68,7 @@ def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experi
     words = labels.sample_wordings()
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=batch.frames.is_cuda):
         d, kappa = model(batch)
-    fn = M.false_negative_mask(U, g, U[target], g[target], target, exp.dupmask)
+    fn = M.false_negative_mask(U, g, U[target], g[target], target, train.dupmask)
     lg = M.logits(d, kappa, words, fn)
     ramp = min(1.0, st.step / max(1.0, train.hard_neg_ramp * st.total)) if train.hard_neg_ramp > 0 else 1.0
     beta = exp.beta * ramp

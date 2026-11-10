@@ -21,12 +21,10 @@ import torch.nn.functional as F
 
 
 # --------------------------------------------------------------------------------------------------------- objective
-def false_negative_mask(U, cand_group, target_key, target_group, target, theta: float | None) -> torch.Tensor:
-    """[B, N] True where a candidate must not count as a negative: the same instruction group as the target, or (theta
-    not None) a near-duplicate intent, cos(target key, candidate) > theta. The target column itself is never masked."""
-    m = target_group[:, None] == cand_group[None, :]
-    if theta is not None:
-        m = m | (target_key @ U.T > theta)
+def false_negative_mask(U, cand_group, target_key, target_group, target, theta: float) -> torch.Tensor:
+    """[B, N] True where a candidate must not count as a negative: the same instruction group as the target, or a
+    near-duplicate intent, cos(target key, candidate) > theta. The target column itself is never masked."""
+    m = (target_group[:, None] == cand_group[None, :]) | (target_key @ U.T > theta)
     m[torch.arange(len(target), device=U.device), target] = False
     return m
 

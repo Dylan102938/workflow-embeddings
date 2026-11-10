@@ -13,7 +13,7 @@ const Q_STATUSES = ["not started", "running", "stale", "done"];
 const VAR_NAMES = {
   arch: "architecture", dm: "d_model", dh: "d_head", nl: "n_layers", nh: "n_heads", drop: "dropout", smooth: "label smoothing",
   patch: "screen patch tokens per frame", lr: "peak learning rate", bs: "batch size (sessions)", ep: "epochs",
-  beta: "hard-negative beta", dupmask: "near-duplicate mask (training)", qkv: "per-token-type projections", seed: "seed",
+  beta: "hard-negative beta", seed: "seed",
 };
 const SMOOTH = [0, 10, 25, 50, 100, 200, 400, 800, 1600, 3200, 6400];   // EMA window in steps (slider index)
 const DASHES = [null, [6, 3], [2, 3]];

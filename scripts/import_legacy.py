@@ -10,6 +10,7 @@ steps.jsonl rows are 50-step means of the training loss (no rigid_loss / avg_dis
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import subprocess
 import sys
@@ -78,13 +79,15 @@ def experiment(a: dict) -> tuple[Experiment | None, str]:
     off = {k: a.get(k) for k, v in RECIPE.items() if k in a and a[k] != v}
     if off:
         return None, f"recipe {off}"
-    theta = float(a.get("theta_fn", 0.9))
+    if float(a.get("theta_fn", 0.9)) != 0.8:
+        return None, f"near-duplicate mask {a.get('theta_fn')} (fixed at 0.8)"
+    if a.get("qkv_mode", "shared") != "shared":
+        return None, f"qkv_mode {a.get('qkv_mode')} (removed)"
     try:
         return Experiment(arch=new_arch, dm=int(a["d"]), dh=int(a.get("d_head", 64)), nl=nl, nh=int(a["n_heads"]),
                           drop=float(a["dropout"]), smooth=float(a.get("label_smooth", 0.0)), patch=PATCH[frames],
                           lr=float(a["lr"]), bs=int(a.get("batch", 64)), ep=int(a["epochs"]),
-                          beta=float(a.get("hard_neg", 0.0)), dupmask=None if theta >= 1 else theta,
-                          qkv=a.get("qkv_mode", "shared").replace("_", "-"), seed=int(a.get("seed", 0))), ""
+                          beta=float(a.get("hard_neg", 0.0)), seed=int(a.get("seed", 0))), ""
     except Exception as e:
         return None, str(e)
 
@@ -135,7 +138,8 @@ def convert_run(src: Path, root: Path) -> str:
 
 def convert_ckpt(path: Path, root: Path) -> str:
     """An old checkpoint ({"model", "cfg", "args", "step"}) -> the new format ({"model", "model_cfg", "id", ...}).
-    Parameter names are unchanged for the transformer archs; the GRU final block moved into model/gru.py."""
+    Q/K/V projections are plain Linear layers now (were 1-element ModuleLists); the GRU final block moved into
+    model/gru.py."""
     import torch
     state = torch.load(path, map_location="cpu", weights_only=False)
     exp, why = experiment(state["args"])
@@ -143,13 +147,14 @@ def convert_ckpt(path: Path, root: Path) -> str:
         return f"skip   {path}: {why}"
     c = state["cfg"]
     model_cfg = {"arch": exp.arch, "d": exp.dm, "d_head": exp.dh, "n_layers": exp.nl, "n_heads": exp.nh,
-                 "dropout": exp.drop, "qkv": exp.qkv, "d_key": c["d_key"], "d_vis": c["d_vis"], "n_tok": c["n_tok"],
+                 "dropout": exp.drop, "d_key": c["d_key"], "d_vis": c["d_vis"], "n_tok": c["n_tok"],
                  "n_key_tokens": c["n_keys"], "d_text": c["d_text"], "e_max": c["e_max"], "tok_drop": c["tok_drop"],
                  "mlp_ratio": c["mlp_ratio"], "k_min": c["k_min"], "k_max": c["k_max"], "k_init": c["k_init"],
                  "checkpointing": c.get("xf_ckpt", True)}
     ren = {"gru_in.": "gru.norm_in.", "h_norm.": "gru.norm_out."} if exp.arch == "gru" else {}
     sd = {}
     for k, v in state["model"].items():
+        k = re.sub(r"\.(wq|wk|wv)\.0\.", r".\1.", k)                 # Q/K/V were 1-element ModuleLists
         if exp.arch == "gru" and k.startswith("gru.") and not k.startswith("gru.norm"):
             k = "gru.cell." + k[len("gru."):]
         for a, b in ren.items():

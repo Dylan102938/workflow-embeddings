@@ -13,7 +13,7 @@ from .transformer import ModelConfig, WorkflowTransformer
 def model_config(exp, train, data) -> ModelConfig:
     """exp: config.Experiment, train: config.TrainConfig, data: data.SessionData (input / label dimensions)."""
     return ModelConfig(
-        arch=exp.arch, d=exp.dm, d_head=exp.dh, n_layers=exp.nl, n_heads=exp.nh, dropout=exp.drop, qkv=exp.qkv,
+        arch=exp.arch, d=exp.dm, d_head=exp.dh, n_layers=exp.nl, n_heads=exp.nh, dropout=exp.drop,
         d_key=data.keys.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, n_key_tokens=data.n_key_tokens,
         d_text=data.text_vecs.shape[1], e_max=int(data.ev["ev_type"].shape[1]), tok_drop=train.tok_drop,
         mlp_ratio=train.mlp_ratio, k_min=train.k_min, k_max=train.k_max, k_init=train.k_init,

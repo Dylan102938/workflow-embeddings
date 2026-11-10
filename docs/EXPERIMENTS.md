@@ -70,6 +70,7 @@ Every run writes raw data only (no summaries; the dashboard computes those) to
 | `steps.jsonl` | jsonl, one row per training step | `step, epoch, time, loss, rigid_loss, avg_dist, lr, grad_norm, beta, data_s, step_s` |
 | `evals.jsonl` | jsonl, one row every `eval_steps` (and at the last step) | `step, epoch, time, val_loss, val_r@1, val_r@5, val_avg_log_dist_100NN, val_judged_r@1, val_judged_r@5, val_judged_ndcg@10, max_mem_gb` |
 | `final.json` | json, written once at the end | `best_step, selected_on` and every `val_*` / `test_*` metric at the chosen checkpoint, `train_minutes` |
+| `test_embeddings.npz` | npz, written once at the end | every test step's direction d (fp16) and confidence kappa at the chosen checkpoint (format: `wfemb/eval.py`); the demo is built from it (~360 MB, downloaded with `--emb`) |
 | `best.pt`, `last.pt` | checkpoints | model (EMA) weights + config; not downloaded by default |
 
 `time` is seconds since the run started. A run without `final.json` is still running (or died). The results root is

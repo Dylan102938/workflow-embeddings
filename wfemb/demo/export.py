@@ -1,22 +1,21 @@
 """Scrubbable workflow demo: the model's intent beliefs at every step, and the 2D trajectory of its embedding among all
 test workflows. Writes a bundle that demo/index.html plays (screenshots, actions, top intents, PCA map).
 
-A run is given by its id (docs/EXPERIMENTS.md); its checkpoint is read from the results tree (fetch it with
-`python -m wfemb.storage.fetch ... --ckpt`). BUNDLE defaults to dashboard/bundles/<run id>, where the dashboard's Demo
-tab finds it.
+A run is given by its id (docs/EXPERIMENTS.md). Everything comes from its results folder: test_embeddings.npz (every
+test step's d_t and kappa_t, written by the final test evaluation; `python -m wfemb.storage.fetch ... --emb`) and, for
+raw workflows only, best.pt (`--ckpt`). Screenshots come from a cache of all test sessions' screenshots (`screens`,
+made once where the AgentNet archives are), else from the archives. No GPU or frame cache is needed except for --raw.
+BUNDLE defaults to dashboard/bundles/<run id>, where the dashboard's Demo tab finds it.
 
-  # (where the frame cache is) the test sessions' frame features as one file, for running the demo elsewhere
-  python -m wfemb.demo extract    --id <run id>
-  # every test step's direction d_t and confidence kappa_t (cached)
-  python -m wfemb.demo embed      --id <run id>
-  # 2D PCA of all test workflows' final embeddings + clusters -> BUNDLE/background.json
-  python -m wfemb.demo background --id <run id>
-  # workflows: illustrative test sessions, specific AgentNet test sessions, or ANY workflow given as raw steps
+  python -m wfemb.demo bundle --id <run id>       # background + export --auto 8 (+ --like's workflows) + frames
+  # or step by step:
+  python -m wfemb.demo background --id <run id>   # 2D PCA of all test workflows' final embeddings + clusters
   python -m wfemb.demo export --id <run id> --auto 8
   python -m wfemb.demo export --id <run id> --session <task_id> [--session ...]
   python -m wfemb.demo export --id <run id> --raw my_workflow.json [--single_file]
-  # (on rnn, where the AgentNet archives are) screenshots of the exported AgentNet sessions
-  python -m wfemb.demo frames --id <run id>
+  python -m wfemb.demo frames --id <run id>       # screenshots of the bundle's AgentNet sessions
+  # once, where the AgentNet archives are (rnn): every test session's screenshots -> --screens
+  python -m wfemb.demo screens --screens /nas/ttl=60d/dfeng/workflow-embeddings/demo_screens
 
 Raw workflow format (JSON). Each step is the screenshot the user saw and the pyautogui-style action code they ran on
 it (AgentNet convention: coordinates as fractions of the screen; pixel coordinates are detected and normalized):
@@ -52,12 +51,13 @@ from ..model import ModelConfig, build_model
 from ..prep import actions
 from ..prep.actions import EVENT_TYPES, TYPE_ID, parse_code
 from ..storage import paths
-from ..storage.frames import FrameStore, np_load, read_chunked
+from ..storage.frames import np_load, read_chunked
 
 E_MAX, K_MAX = 8, 4
 SIGLIP = "google/siglip2-so400m-patch16-naflex"
 TEXT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-DEMO = paths.DATA / "demo"
+DEMO = paths.DATA / "demo"                                   # derived caches (PCA basis per run)
+SCREENS = DEMO / "screens"                                   # <session id>/<step>.jpg of every test session
 
 
 # ----------------------------------------------------------------------------------------------------------- assets
@@ -68,7 +68,8 @@ class Assets:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.exp = Experiment.from_id(run_id)
         self.id = self.exp.id
-        self.state = torch.load(Path(default_results()) / self.exp.path / ckpt, map_location="cpu", weights_only=False)
+        ck = Path(default_results()) / self.exp.path / ckpt
+        self.state = torch.load(ck, map_location="cpu", weights_only=False) if ck.exists() else None
         dc = DataConfig()
         kd = self.keys_dir = Path(dc.root) / dc.keys
         self.frames_dir = dc.frames_dir(self.exp)
@@ -82,8 +83,8 @@ class Assets:
         self.split = np.array([s["split"] for s in self.sessions])
         self.test_idx = np.nonzero(self.split == "test")[0]
         self.id2idx = {s["id"]: i for i, s in enumerate(self.sessions)}
-        self.cfg = ModelConfig(**self.state["model_cfg"])
-        self.model = self.build(torch.from_numpy(self.text_vecs))
+        self.cfg = ModelConfig(**self.state["model_cfg"]) if self.state else None
+        self.model = self.build(torch.from_numpy(self.text_vecs)) if self.state else None    # only --raw needs it
         # intent bank: unique instruction texts of the training + test sessions (the evaluation's candidates)
         first = {}
         for i in np.nonzero(np.isin(self.split, ["train", "test"]))[0]:
@@ -134,38 +135,16 @@ def run_model(model, device, frames: list[np.ndarray], evs: list[dict]):
     return [(d[i, :len(f)], k[i, :len(f)]) for i, f in enumerate(frames)]
 
 
-def test_frames_path(exp: Experiment) -> Path:
-    return DEMO / ("test_frames.npy" if exp.side == 16 else f"test_frames_g{exp.side}.npy")
-
-
-class TestFrames:
-    """Frame features of the test sessions: DATA/demo/test_frames[_g<side>].npy (see `extract`), else the cache."""
-
-    def __init__(self, A: Assets):
-        sub = test_frames_path(A.exp)
-        if sub.exists():
-            self.mm = np.load(sub, mmap_mode="r")
-            ix = np.load(sub.with_name(sub.name.replace("frames", "index").replace(".npy", ".npz")))
-            self.pos = {int(s): (int(o), int(n)) for s, o, n in zip(ix["sidx"], ix["offset"], ix["length"])}
-            self.store = None
-        else:
-            self.store = FrameStore(A.frames_dir)
-            self.A = A
-
-    def get(self, gi: int) -> np.ndarray:
-        if self.store is None:
-            o, n = self.pos[gi]
-            return np.ascontiguousarray(self.mm[o:o + n])
-        o, n = int(self.A.ev["sess_offset"][gi]), int(self.A.ev["sess_len"][gi])
-        return self.store.gather(np.arange(o, o + n))
-
-
-def emb_path(run_id):
-    return DEMO / f"{run_id}_test_embeddings.npz"
+def emb_path(exp: Experiment) -> Path:
+    return Path(default_results()) / exp.path / "test_embeddings.npz"
 
 
 def load_embeddings(A: Assets):
-    z = np.load(emb_path(A.id))
+    p = emb_path(A.exp)
+    if not p.exists():
+        raise SystemExit(f"{p} missing: fetch it (python -m wfemb.storage.fetch rnn|baseten --emb), or write it where "
+                         f"the frame cache is: python -m wfemb.eval id={A.id} save=True")
+    z = np.load(p)
     d, k = z["d"], z["k"]                                  # read each array once (NpzFile re-reads on every access)
     return {int(s): (d[o:o + n].astype(np.float32), k[o:o + n]) for s, o, n in zip(z["sidx"], z["offset"], z["length"])}
 
@@ -186,32 +165,6 @@ def scores(A: Assets, d: np.ndarray, k: np.ndarray, topk: int = 5, true_text: st
         out["true_rank"] = ((logp > tl[:, None]).sum(-1) + 1).cpu().numpy()
         out["true_p"] = tl.exp().cpu().numpy()
     return out
-
-
-# ------------------------------------------------------------------------------------------------------------- embed
-def cmd_embed(args):
-    A = Assets(args.id, args.ckpt)
-    TF_ = TestFrames(A)
-    sidx = A.test_idx
-    lens = A.ev["sess_len"][sidx].astype(np.int64)
-    order = np.argsort(lens)
-    res = {}
-    t0 = time.time()
-    batch, n_fr = [], 0
-    for i in list(order) + [None]:
-        if i is not None and (n_fr + lens[i] <= args.max_frames or not batch):
-            batch.append(int(sidx[i]))
-            n_fr += int(lens[i])
-            continue
-        outs = run_model(A.model, A.device, [TF_.get(g) for g in batch], [A.session_events(g) for g in batch])
-        res.update(zip(batch, outs))
-        batch, n_fr = ([int(sidx[i])], int(lens[i])) if i is not None else ([], 0)
-    off = np.r_[0, np.cumsum(lens)[:-1]]
-    d = np.concatenate([res[int(g)][0] for g in sidx]).astype(np.float16)
-    k = np.concatenate([res[int(g)][1] for g in sidx]).astype(np.float32)
-    DEMO.mkdir(parents=True, exist_ok=True)
-    np.savez(emb_path(A.id), sidx=sidx, offset=off, length=lens, d=d, k=k)
-    print(f"{len(sidx)} test sessions, {len(d)} steps embedded in {time.time() - t0:.0f}s -> {emb_path(A.id)}")
 
 
 # -------------------------------------------------------------------------------------------------------- background
@@ -559,6 +512,8 @@ def export_raw(A: Assets, pca, path: Path, args):
         if f is not None:
             ev["focus"][t] = f
     texts = A.vocab["texts"] + list(new_texts)
+    if A.model is None:
+        raise SystemExit("--raw needs the run's checkpoint: python -m wfemb.storage.fetch ... --ckpt")
     model = A.model
     if new_texts:
         tv = encode_texts(list(new_texts), A.device)
@@ -619,63 +574,101 @@ def encode_texts(texts, device) -> np.ndarray:
     return v.astype(np.float16)
 
 
-# -------------------------------------------------------------------------------------------- rnn-side helpers
+# ---------------------------------------------------------------------------------------------------- screenshots
+class Screenshots:
+    """A test session's screenshots (JPEG bytes): from the screenshot cache if it has them, else from the AgentNet
+    split archives (paths.ZIPS; on rnn / Baseten)."""
+
+    def __init__(self, cache: Path = SCREENS):
+        self.cache, self.zips, self.index = Path(cache), {}, {}
+
+    def _archive(self, src):
+        from ..prep.splitzip import SplitZip
+        if src not in self.zips:
+            self.zips[src] = SplitZip(paths.ZIPS[src])
+            self.index[src] = self.zips[src].basename_index()
+        return self.zips[src], self.index[src]
+
+    def get(self, session: dict, t: int) -> bytes | None:
+        c = self.cache / session["id"] / f"{t}.jpg"
+        if c.exists():
+            return c.read_bytes()
+        from PIL import Image
+        z, idx = self._archive(session["source"])
+        member = idx.get(session["images"][t])
+        return None if member is None else jpeg(Image.open(io.BytesIO(z.read(member))))
+
+
 def cmd_frames(args):
-    """Screenshots of the exported AgentNet sessions, read from the split archives (run where paths.ZIPS exist)."""
-    from PIL import Image
-    from ..prep.splitzip import SplitZip
+    """Screenshots of the bundle's AgentNet sessions -> BUNDLE/frames/<session id>/<step>.jpg."""
     out = Path(args.out)
-    zips, index = {}, {}
+    shots = Screenshots(Path(args.screens) if args.screens else SCREENS)
+    by_id = {s["id"]: s for s in pickle.load(read_chunked(paths.PREP / "sessions.pkl"))}
     for f in sorted((out / "workflows").glob("*.json")):
         if f.name == "index.json":
             continue
         wf = json.load(open(f))
-        an = wf.get("agentnet")
-        if not an:
+        if not wf.get("agentnet"):
             continue
-        src = an["archive"]
-        if src not in zips:
-            zips[src] = SplitZip(paths.ZIPS[src])
-            index[src] = zips[src].basename_index()
         fdir = out / "frames" / wf["id"]
         fdir.mkdir(parents=True, exist_ok=True)
-        for t, name in enumerate(an["images"][:wf["n_steps"]]):
-            if (fdir / f"{t}.jpg").exists():
-                continue
-            member = index[src].get(name)
-            if member is None:
-                continue
-            (fdir / f"{t}.jpg").write_bytes(jpeg(Image.open(io.BytesIO(zips[src].read(member)))))
-        print(f"{wf['id']}: {wf['n_steps']} frames", flush=True)
+        missing = 0
+        for t in range(wf["n_steps"]):
+            if not (fdir / f"{t}.jpg").exists():
+                b = shots.get(by_id[wf["id"]], t)
+                if b is None:
+                    missing += 1
+                else:
+                    (fdir / f"{t}.jpg").write_bytes(b)
+        print(f"{wf['id']}: {wf['n_steps']} frames" + (f" ({missing} missing)" if missing else ""), flush=True)
 
 
-def cmd_extract(args):
-    from ..data import SessionData
-    t0 = time.time()
-    exp = Experiment.from_id(args.id)
-    data = SessionData(DataConfig(), exp)
-    sidx = data.indices("test")
-    lens, offs = data.length[sidx].astype(np.int64), data.offset[sidx].astype(np.int64)
-    DEMO.mkdir(parents=True, exist_ok=True)
-    out = test_frames_path(exp)
-    mm = np.lib.format.open_memmap(out, mode="w+", dtype=np.uint16,
-                                   shape=(int(lens.sum()), data.frames.n_tok, data.frames.dim))
-    pos = 0
-    for o, n in zip(offs, lens):
-        data.frames.gather_into(np.arange(o, o + n), mm[pos:pos + n])
-        pos += n
-    mm.flush()
-    np.savez(out.with_name(out.name.replace("frames", "index").replace(".npy", ".npz")), sidx=sidx, offset=np.r_[0, np.cumsum(lens)[:-1]], length=lens)
-    print(f"{len(sidx)} test sessions, {pos} frames in {time.time() - t0:.0f}s -> {DEMO}")
+def cmd_screens(args):
+    """Every test session's screenshots -> --screens/<session id>/<step>.jpg (once, where the archives are)."""
+    from concurrent.futures import ThreadPoolExecutor
+    out = Path(args.screens) if args.screens else SCREENS
+    sessions = [s for s in pickle.load(read_chunked(paths.PREP / "sessions.pkl")) if s["split"] == "test"]
+    shots = Screenshots(Path("/nonexistent"))                    # always read the archives
+    for src in {s["source"] for s in sessions}:
+        shots._archive(src)
+    t0, done = time.time(), 0
+
+    def one(s):
+        d = out / s["id"]
+        d.mkdir(parents=True, exist_ok=True)
+        for t in range(len(s["images"])):
+            if not (d / f"{t}.jpg").exists() and (b := shots.get(s, t)) is not None:
+                (d / f"{t}.jpg").write_bytes(b)
+    with ThreadPoolExecutor(args.workers) as ex:
+        for _ in ex.map(one, sessions):
+            done += 1
+            if done % 200 == 0:
+                print(f"{done}/{len(sessions)} sessions, {time.time() - t0:.0f}s", flush=True)
+    print(f"{len(sessions)} test sessions' screenshots in {out} ({time.time() - t0:.0f}s)")
+
+
+def cmd_bundle(args):
+    """background + export (--auto illustrative workflows, plus the workflows of the --like run's bundle, so runs can
+    be compared on the same workflows) + frames."""
+    cmd_background(args)
+    like = Path(args.out).parent / Experiment.from_id(args.like).id / "workflows" / "index.json" if args.like else None
+    if like is not None and like.exists() and like.parent.parent != Path(args.out):
+        args.session = args.session + [e["id"] for e in json.load(open(like)) if e.get("source") == "agentnet-test"]
+    args.auto = args.auto or 8
+    cmd_export(args)
+    cmd_frames(args)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["embed", "background", "export", "frames", "extract"])
+    ap.add_argument("cmd", choices=["bundle", "background", "export", "frames", "screens"])
     ap.add_argument("--id", default=Experiment().id, help="run id (default: the best model's)")
     ap.add_argument("--ckpt", default="best.pt")
     ap.add_argument("--out", default="", help="bundle folder (default dashboard/bundles/<run id>)")
-    ap.add_argument("--max_frames", type=int, default=1024, help="embed: frames per batch")
+    ap.add_argument("--like", default=Experiment().id,
+                    help="bundle: also export this run's bundle's workflows (default: the best model's)")
+    ap.add_argument("--screens", default="", help="screenshot cache (default DATA/demo/screens)")
+    ap.add_argument("--workers", type=int, default=16, help="screens: threads")
     ap.add_argument("--k", type=int, default=10, help="background: number of clusters")
     ap.add_argument("--auto", type=int, default=0, help="export: number of illustrative test workflows to choose")
     ap.add_argument("--hard", type=int, default=2, help="export --auto: how many of them are hard cases")
@@ -688,8 +681,8 @@ def main():
     args = ap.parse_args()
     args.id = Experiment.from_id(args.id).id                     # canonical form
     args.out = args.out or str(REPO / "dashboard" / "bundles" / args.id)
-    {"embed": cmd_embed, "background": cmd_background, "export": cmd_export, "frames": cmd_frames,
-     "extract": cmd_extract}[args.cmd](args)
+    {"bundle": cmd_bundle, "background": cmd_background, "export": cmd_export, "frames": cmd_frames,
+     "screens": cmd_screens}[args.cmd](args)
 
 
 if __name__ == "__main__":

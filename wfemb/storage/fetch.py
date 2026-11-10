@@ -3,7 +3,9 @@
   python -m wfemb.storage.fetch rnn                    # rsync rnn:$WFEMB_DATA/results (json/jsonl only)
   python -m wfemb.storage.fetch baseten                # every job of the Baseten training project "wfemb"
   python -m wfemb.storage.fetch baseten --job q9gge93  # one job
+  ... --emb                                            # also test_embeddings.npz (the demo's input, ~360 MB/run)
   ... --ckpt                                           # also the checkpoints (best.pt, last.pt)
+  ... --screens                                        # Baseten: the test screenshot cache (demo_screens.tar)
 
 Baseten jobs leave their results tree in the job's checkpoint directory (runners/baseten/train.sh), and demo jobs their
 bundles (runners/baseten/demo.sh, -> dashboard/bundles/); `truss train get_checkpoint_urls` lists those files with
@@ -21,13 +23,15 @@ import urllib.request
 from pathlib import Path
 
 from ..config import REPO, default_results
+from . import paths
 
 RNN_RESULTS = "rnn:/nas/ucb/dfeng/data/workflow-embeddings/results/"
 BASETEN_PROJECT = "wfemb"
 
 
-def fetch_rnn(root: Path, ckpt: bool, src: str = RNN_RESULTS):
-    inc = ["--include=*/", "--include=*.json", "--include=*.jsonl"] + (["--include=*.pt"] if ckpt else [])
+def fetch_rnn(root: Path, ckpt: bool, emb: bool = False, src: str = RNN_RESULTS):
+    inc = (["--include=*/", "--include=*.json", "--include=*.jsonl"] + (["--include=*.pt"] if ckpt else [])
+           + (["--include=*_embeddings.npz"] if emb else []))
     cmd = ["rsync", "-a", "--prune-empty-dirs", *inc, "--exclude=*", src, str(root) + "/"]
     print(" ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
@@ -54,7 +58,7 @@ def baseten_jobs(project: str = BASETEN_PROJECT) -> list[dict]:
     return jobs.get("training_jobs", jobs)
 
 
-def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None,
+def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None, emb: bool = False, screens: bool = False,
                   bundles: Path = REPO / "dashboard" / "bundles"):
     jobs = job_ids or [j["id"] for j in baseten_jobs() if j["current_status"].endswith(("COMPLETED", "RUNNING"))]
     for jid in jobs:
@@ -69,8 +73,10 @@ def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None,
         n_new = 0
         for a in arts:
             rel = a["relative_file_name"]
-            if rel.startswith("results/") and (ckpt or not rel.endswith(".pt")):
+            if rel.startswith("results/") and (ckpt or not rel.endswith(".pt")) and (emb or not rel.endswith(".npz")):
                 dst = root / rel[len("results/"):]
+            elif rel == "demo_screens.tar" and screens:
+                dst = paths.DATA / "demo" / rel
             elif rel.startswith("bundles/"):
                 dst = bundles / rel[len("bundles/"):]
             else:
@@ -83,6 +89,11 @@ def fetch_baseten(root: Path, ckpt: bool, job_ids: list[str] | None = None,
                     f.write(chunk)
             n_new += 1
         print(f"{jid}: {n_new} file(s) downloaded")
+        tar = paths.DATA / "demo" / "demo_screens.tar"
+        if screens and tar.exists():                             # -> DATA/demo/screens/<session id>/<step>.jpg
+            subprocess.run(["tar", "xf", str(tar), "-C", str(tar.parent)], check=True)
+            tar.unlink()
+            print(f"screenshots -> {tar.parent / 'screens'}")
 
 
 def main():
@@ -91,13 +102,15 @@ def main():
     ap.add_argument("--root", default=default_results())
     ap.add_argument("--job", action="append", help="Baseten job id (repeatable; default: all jobs of the project)")
     ap.add_argument("--ckpt", action="store_true", help="also download checkpoints")
+    ap.add_argument("--emb", action="store_true", help="also download test_embeddings.npz (demo input)")
+    ap.add_argument("--screens", action="store_true", help="Baseten: also the test screenshot cache")
     a = ap.parse_args()
     root = Path(a.root)
     root.mkdir(parents=True, exist_ok=True)
     if a.source == "rnn":
-        fetch_rnn(root, a.ckpt)
+        fetch_rnn(root, a.ckpt, a.emb)
     else:
-        fetch_baseten(root, a.ckpt, a.job)
+        fetch_baseten(root, a.ckpt, a.job, a.emb, a.screens)
 
 
 if __name__ == "__main__":

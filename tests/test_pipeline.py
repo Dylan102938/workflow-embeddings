@@ -47,7 +47,8 @@ def test_train_end_to_end(synth, tmp_path, arch, beta):
                     data=DataConfig(root=str(synth), bulk=str(synth / "bulk")), results=str(tmp_path))
     final = training_loop(cfg)
     d = tmp_path / exp.path
-    assert {p.name for p in d.iterdir()} >= {"config.json", "steps.jsonl", "evals.jsonl", "final.json", "best.pt"}
+    assert {p.name for p in d.iterdir()} >= {"config.json", "steps.jsonl", "evals.jsonl", "final.json", "best.pt",
+                                            "test_embeddings.npz"}
     steps = [json.loads(l) for l in (d / "steps.jsonl").read_text().splitlines()]
     assert [s["step"] for s in steps] == list(range(1, 25))
     assert {"loss", "rigid_loss", "avg_dist", "lr", "grad_norm", "beta", "epoch", "time"} <= set(steps[0])

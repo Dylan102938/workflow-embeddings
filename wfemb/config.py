@@ -134,6 +134,7 @@ class EvalConfig:
     eval_steps: int = 500               # validation every this many steps (and at the last step)
     dupmask: float = 0.8                # false-negative threshold in evaluation, fixed so val/test metrics compare
     knn: int = 100                      # neighbors for avg_log_dist_100NN
+    save_test_embeddings: bool = True   # final test pass writes test_embeddings.npz (every step's d, kappa; ~360 MB)
     batch: int = 64
     max_frames: int = 2048              # cap on sessions x steps per evaluation batch
 

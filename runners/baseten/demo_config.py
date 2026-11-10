@@ -1,4 +1,4 @@
-"""Baseten job: demo bundles for finished runs (see runners/baseten/demo.sh). From the repo root:
+"""Baseten job: demo inputs for finished runs (test embeddings, screenshot cache; see runners/baseten/demo.sh):
   WFEMB_DEMO_IDS="<run id> ..." [WFEMB_DEMO_LEGACY="<old run name> ..."] \
       truss train push runners/baseten/demo_config.py --job-name demo"""
 import os

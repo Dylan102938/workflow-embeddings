@@ -6,6 +6,11 @@ EvalConfig.dupmask so every run is scored the same way.
 
   python -m wfemb.eval id=<run id>                       # the run's best checkpoint on the test set
   python -m wfemb.eval id=<run id> split=val ckpt=last.pt
+  python -m wfemb.eval id=<run id> save=True             # also write <split>_embeddings.npz into the run folder
+
+<split>_embeddings.npz holds every step's direction and confidence (the raw data the demo is built from; training
+writes test_embeddings.npz at the end): sidx [S] session indices, offset / length [S], d [sum of lengths, D] fp16,
+k [sum of lengths] fp32; session i's steps are rows offset[i] .. offset[i] + length[i] - 1.
 """
 from __future__ import annotations
 
@@ -41,14 +46,26 @@ def embed(model, data: SessionData, sidx: np.ndarray, cfg: EvalConfig, device, d
     return d_all, k_all
 
 
+def save_embeddings(path: Path, sidx: np.ndarray, d_all: torch.Tensor, k_all: torch.Tensor, lens: torch.Tensor):
+    """Every valid step's d (fp16) and kappa, concatenated per session (format: module docstring)."""
+    L = lens.numpy()
+    tmp = Path(path).with_suffix(".tmp.npz")
+    np.savez(tmp, sidx=np.asarray(sidx), offset=np.r_[0, np.cumsum(L)[:-1]], length=L,
+             d=torch.cat([d_all[i, :n] for i, n in enumerate(L)]).numpy(),
+             k=torch.cat([k_all[i, :n] for i, n in enumerate(L)]).numpy())
+    tmp.rename(path)
+
+
 @torch.no_grad()
 def evaluate(model, data: SessionData, split: str, labels: TrainLabels, cfg: EvalConfig, device,
-             data_cfg: DataConfig | None = None) -> dict:
-    """All metrics of one split, keyed f"{split}_<metric>"."""
+             data_cfg: DataConfig | None = None, embeddings_out: Path | None = None) -> dict:
+    """All metrics of one split, keyed f"{split}_<metric>". embeddings_out: also save every step's embedding there."""
     sidx = data.indices(split)
     S = len(sidx)
     d_all, k_all = embed(model, data, sidx, cfg, device, data_cfg)
     lens = torch.from_numpy(data.length[sidx].astype(np.int64))
+    if embeddings_out is not None:
+        save_embeddings(embeddings_out, sidx, d_all, k_all, lens)
     U_ref = torch.cat([labels.U, torch.from_numpy(data.keys[sidx]).to(device)])          # [N + S, D]
     g_ref = torch.cat([labels.group, torch.from_numpy(data.group[sidx]).to(device)])
     tgt_all = torch.arange(S, device=device) + len(labels)
@@ -89,7 +106,7 @@ def format_metrics(m: dict, title: str = "") -> str:
     return "\n".join(lines)
 
 
-def main(id: str, split: str = "test", ckpt: str = "best.pt", results: str = "", device: str = "",
+def main(id: str, split: str = "test", ckpt: str = "best.pt", results: str = "", device: str = "", save: bool = False,
          data: DataConfig = DataConfig(), eval: EvalConfig = EvalConfig()):
     from .model import load_checkpoint
     exp = Experiment.from_id(id)
@@ -99,7 +116,8 @@ def main(id: str, split: str = "test", ckpt: str = "best.pt", results: str = "",
     sd = SessionData(data, exp)
     model, state = load_checkpoint(run_dir / ckpt, torch.from_numpy(sd.text_vecs), dev)
     t0 = time.time()
-    m = evaluate(model, sd, split, TrainLabels(sd, dev), eval, dev, data)
+    m = evaluate(model, sd, split, TrainLabels(sd, dev), eval, dev, data,
+                 embeddings_out=run_dir / f"{split}_embeddings.npz" if save else None)
     print(format_metrics(m, f"{exp.id}\n{ckpt} (step {state['step']}), {split}, {time.time() - t0:.0f}s"))
     return m
 

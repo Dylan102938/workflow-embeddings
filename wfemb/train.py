@@ -188,7 +188,8 @@ def training_loop(cfg: RunConfig) -> dict | None:
     st.ema.load_state_dict(state["model"])
     final = {"best_step": state["step"], "selected_on": "val_loss"}
     for split in ("val", "test"):
-        final.update(evaluate(st.ema, data, split, labels, cfg.eval, device, cfg.data))
+        emb = run_dir / "test_embeddings.npz" if split == "test" and cfg.eval.save_test_embeddings else None
+        final.update(evaluate(st.ema, data, split, labels, cfg.eval, device, cfg.data, embeddings_out=emb))
     final["train_minutes"] = round((time.time() - t0) / 60, 2)
     out.final(final)
     out.close()

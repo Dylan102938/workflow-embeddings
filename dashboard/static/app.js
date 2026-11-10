@@ -913,14 +913,12 @@ function renderDemo() {
   }
   const out = `${S.data.bundles_out || "dashboard/bundles"}/${target}`;
   const cmds = [
-    `python -m wfemb.demo embed --id ${target}`,
-    `python -m wfemb.demo background --id ${target} --out ${out}`,
-    `python -m wfemb.demo export --id ${target} --out ${out} --auto 8`,
+    `python -m wfemb.storage.fetch baseten --emb    # or: rnn --emb  (the run's test_embeddings.npz)`,
+    `python -m wfemb.demo bundle --id ${target} --out ${out}`,
   ];
   msg.innerHTML = `<div class="howto"><h3>No demo bundle for this run yet</h3>
-    <p>The bundle is read from <code>${esc(root)}/${esc(target)}/</code>. Make it from the repo root (needs the run's <code>best.pt</code> and the test frame features; screenshots of AgentNet sessions come from <code>python -m wfemb.demo frames --id …</code> on rnn):</p>
-    ${cmds.map((c) => `<div class="cmd"><code>${esc(c)}</code>${copyBtn(c, "Copy command")}</div>`).join("")}
-    <div class="cmd"><code>${esc(cmds.join(" && \\\n  "))}</code>${copyBtn(cmds.join(" && "), "Copy all three")}</div>
+    <p>The bundle is read from <code>${esc(root)}/${esc(target)}/</code>. It is built on this machine (CPU) from the run's <code>test_embeddings.npz</code>, which its final test evaluation wrote; screenshots come from the local screenshot cache (<code>fetch baseten --screens</code>, once):</p>
+    ${cmds.map((c) => `<div class="cmd"><code>${esc(c)}</code>${copyBtn(c.replace(/\s+#.*$/, ""), "Copy command")}</div>`).join("")}
     <p class="muted">Bundles are found on the next refresh.</p></div>`;
 }
 

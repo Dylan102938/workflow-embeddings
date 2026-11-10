@@ -2,7 +2,7 @@
 
 Same intent, different wording; app/site names and concrete values are kept. The drift filter
 (THETA_PARA, cosine to the original key) is applied later in text_embed.py.
-Runs in its own environment (vLLM pins its own torch):  see scripts/paraphrase.sbatch
+Runs in its own environment (vLLM pins its own torch):  see runners/slurm/paraphrase.sbatch
 """
 from __future__ import annotations
 

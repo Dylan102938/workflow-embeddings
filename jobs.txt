@@ -1,7 +1,7 @@
 # Run queue. Every run is named by its experiment id (docs/EXPERIMENTS.md).
 #   [name]                 starts a section; a launcher runs one section:
-#                            Baseten: WFEMB_JOB=<name> WFEMB_GPUS=2 truss train push baseten/train_config.py --job-name <name>
-#                            rnn:     scripts/submit.sh <name>
+#                            Baseten: WFEMB_JOB=<name> WFEMB_GPUS=2 truss train push runners/baseten/train_config.py --job-name <name>
+#                            rnn:     runners/slurm/submit.sh <name>
 #   <run id> [overrides]   one run; overrides set recipe fields, e.g. train.max_frames=2048
 #   # ...                  comment
 # The dashboard's Queue view shows each id's status. A run whose results folder has final.json is not rerun.

@@ -6,7 +6,7 @@ Builds a key-set directory (default DATA/keys_openai), loadable with `train.py -
   para_index.npz                   offset / count per session
   text_vecs.npy   -> symlink to the Qwen3-0.6B typed-text vectors (model input features, unchanged)
   raw_*.npy/json                   unique-string embeddings, so re-filtering needs no new API calls
-Needs OPENAI_API_KEY (scripts/openai_keys.sbatch sources the repo's .env).
+Needs OPENAI_API_KEY (runners/slurm/openai_keys.sbatch sources the repo's .env).
 """
 from __future__ import annotations
 

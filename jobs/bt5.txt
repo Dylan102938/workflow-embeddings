@@ -1,0 +1,6 @@
+# 2026-11-09, Baseten H100:2, 2 runs per GPU (pre-refactor code; imported when done). Hard negatives on the best
+# setup, near-duplicate mask off, and a seed-1 control.
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-2_dupmask-0.8_qkv-shared_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-4_dupmask-0.8_qkv-shared_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-2_dupmask-off_qkv-shared_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_dupmask-0.8_qkv-shared_seed-1   # seed control

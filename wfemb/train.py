@@ -1,322 +1,220 @@
-"""Training loop (pseudocode section 5). One run per GPU."""
+"""Training (docs/EXPERIMENTS.md). One run per process; everything it records goes to its results folder.
+
+  python -m wfemb.train id=<run id>                              # e.g. a line of a jobs/*.txt file
+  python -m wfemb.train exp.beta=2 exp.seed=1                    # the best model with changes
+  python -m wfemb.train id=<run id> train.max_steps=200 results=/tmp/results     # quick test
+
+training_step: one optimizer update on one batch (inputs and update spelled out in its docstring).
+training_loop: epochs of training batches; validation every eval_steps; the best checkpoint by val_loss; at the end
+the test evaluation of that checkpoint, written to final.json and printed.
+"""
 from __future__ import annotations
 
-import argparse
 import copy
-import dataclasses
 import faulthandler
-import json
 import math
 import os
+import socket
+import subprocess
 import sys
 import time
-from pathlib import Path
+from dataclasses import dataclass
 
+import chz
 import numpy as np
 import torch
 
-from . import paths
-from .data import Prefetcher, SessionData, length_bucketed_batches
-from .evaluate import evaluate
-from .loss import false_negative_mask, hard_negative_bias, info_nce, smooth_targets
-from .model import ModelConfig, build_model
+from . import metrics as M
+from .config import Experiment, RunConfig, TrainConfig
+from .data import Batch, SessionData, TrainLabels, train_batches
+from .eval import evaluate, format_metrics
+from .model import build_model, model_config
+from .storage.results import RunWriter, dumps, vars_of
 
 
-def get_args(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--run", required=True)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--frames_dir", default=os.environ.get("WFEMB_FRAMES_DIR", str(paths.FRAMES)))
-    ap.add_argument("--keys_dir", default="", help="text-embedder key set (default: paths.KEYS)")
-    ap.add_argument("--frames_mode", default="ram", choices=["ram", "memmap", "pread", "gpu_fp8"],
-                    help="ram: exact bf16 cache in host RAM, copied to the GPU per batch (needs ~110 GB host RAM "
-                         "for the dense cache); memmap / pread: exact bf16 read from the files (pread avoids page "
-                         "faults; use it for shared or NFS-hosted caches); gpu_fp8: lossy fp8 copy on the GPU")
-    # model
-    ap.add_argument("--d", type=int, default=512)
-    ap.add_argument("--h", type=int, default=1024)
-    ap.add_argument("--n_queries", type=int, default=4)
-    ap.add_argument("--dropout", type=float, default=0.0)
-    ap.add_argument("--tok_drop", type=float, default=0.0, help="frame-token dropout in the attention pool")
-    ap.add_argument("--k_min", type=float, default=1.0)
-    ap.add_argument("--k_max", type=float, default=100.0)
-    ap.add_argument("--use_crop", action="store_true")
-    ap.add_argument("--use_effect", action="store_true", help="shorthand for --extra effect")
-    ap.add_argument("--extra", default="", help="comma list of extra crop caches (BULK/frames_<name>) to append")
-    ap.add_argument("--prev_query", nargs="?", const="sum", default="", choices=["", "sum", "sep"],
-                    help="frame pool also queried by the previous action: sum (same queries) or sep (own group)")
-    # optimization
-    ap.add_argument("--batch", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--wd", type=float, default=0.05)
-    ap.add_argument("--epochs", type=float, default=30)
-    ap.add_argument("--warmup", type=int, default=500)
-    ap.add_argument("--ema", type=float, default=0.0, help="EMA decay of weights used for eval/checkpoints (0 = off)")
-    ap.add_argument("--max_len", type=int, default=0)
-    ap.add_argument("--step_drop", type=float, default=0.0, help="training-time intermediate-step dropout")
-    ap.add_argument("--step_drop_anneal", type=float, default=0.0,
-                    help="linearly decay step dropout to 0 over this final fraction of the epochs")
-    ap.add_argument("--gru_layers", type=int, default=1)
-    ap.add_argument("--keep_bias", type=float, default=0.0, help="GRU update-gate bias toward keeping state")
-    ap.add_argument("--n_mix", type=int, default=1, help="readout components (mixture of directions)")
-    ap.add_argument("--compress_latents", type=int, default=0, help="Perceiver-style learned compression latents")
-    ap.add_argument("--compress_blocks", type=int, default=1)
-    ap.add_argument("--hist_queries", type=int, default=0, help="readout queries from h[t-1] (sequential pooling)")
-    ap.add_argument("--static_queries", type=int, default=0, help="learned whole-screen readout queries")
-    ap.add_argument("--avg_grid", type=int, default=0, help="average-pool a dense global grid to this size on load")
-    ap.add_argument("--max_frames", type=int, default=4096, help="cap on B x T per batch (long sessions split)")
-    # per-step transformer (wfemb/xformer.py)
-    ap.add_argument("--arch", default="pool_gru", choices=["pool_gru", "xf", "xf_gru"])
-    ap.add_argument("--n_layers", type=int, default=4)
-    ap.add_argument("--n_heads", type=int, default=8)
-    ap.add_argument("--n_kv_heads", type=int, default=0, help="grouped-query attention (0 = n_heads)")
-    ap.add_argument("--d_head", type=int, default=64)
-    ap.add_argument("--mlp_ratio", type=int, default=4)
-    ap.add_argument("--qkv_mode", default="shared", choices=["shared", "sep_q", "sep_qkv"])
-    ap.add_argument("--h_join", type=int, default=0,
-                    help="first block with the history token (negative: counted from the end, -1 = last block)")
-    ap.add_argument("--no_ev_pos", action="store_true", help="no position embedding for events within a step")
-    ap.add_argument("--no_xf_ckpt", action="store_true",
-                    help="disable activation checkpointing of transformer blocks (on by default: same results, "
-                         "less memory, ~30%% slower)")
-    # loss
-    ap.add_argument("--theta_fn", type=float, default=0.9, help="false-negative threshold used in training")
-    ap.add_argument("--eval_theta_fn", type=float, default=0.9, help="fixed across runs so val metrics compare")
-    ap.add_argument("--no_para", action="store_true", help="disable paraphrase augmentation")
-    ap.add_argument("--para_negatives", action="store_true",
-                    help="every candidate column shows a random wording (not only the positive), so paraphrase "
-                         "style cannot separate positives from negatives")
-    ap.add_argument("--center_keys", action="store_true", help="subtract the train-key mean, renormalize")
-    ap.add_argument("--label_smooth", type=float, default=0.0,
-                    help="eps of similarity-based label smoothing (train only; eval stays plain CE)")
-    ap.add_argument("--smooth_tau", type=float, default=0.05, help="temperature of the smoothing distribution")
-    ap.add_argument("--hard_neg", type=float, default=0.0,
-                    help="beta: weight each negative by exp(beta * cos(target key, its key)) (normalized to mean 1)")
-    ap.add_argument("--hard_neg_ramp", type=float, default=0.0,
-                    help="fraction of training over which beta ramps linearly from 0 to --hard_neg")
-    # eval / logging
-    ap.add_argument("--eval_every", type=int, default=500)
-    ap.add_argument("--log_every", type=int, default=50)
-    ap.add_argument("--curve_splits", default="",
-                    help="comma list from {test,train}: also evaluate these at every eval for learning curves "
-                         "(logged only, never used for checkpoint selection; train = fixed subset of curve_n sessions)")
-    ap.add_argument("--curve_n", type=int, default=3050)
-    ap.add_argument("--select_on", default="loss",
-                    help="val metric for best.pt: loss | key_R@5 | jsession_R@5_cross_app | jsession_nDCG@10_cross_app ...")
-    ap.add_argument("--max_steps", type=int, default=0, help="debug: stop early")
-    return ap.parse_args(argv)
+@dataclass
+class TrainState:
+    model: torch.nn.Module
+    ema: torch.nn.Module              # EMA of the weights: evaluated and checkpointed
+    opt: torch.optim.Optimizer
+    sched: torch.optim.lr_scheduler.LambdaLR
+    total: int                        # optimizer steps of the whole run
+    step: int = 0
+    epoch: int = 0
 
 
-def cosine_with_warmup(opt, warmup, total):
+def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experiment, train: TrainConfig) -> dict:
+    """One optimizer update.
+
+    Inputs
+      batch   B sessions padded to T steps (data.Batch, on the GPU): per step the screen patch tokens
+              [patch, 512], the input events, and valid [B, T] marking real steps
+      labels  the candidates: keys U [N, D] of all N training instructions with their instruction groups; each
+              session's target is the column of its own instruction (labels.target)
+    Update
+      1. forward: d [B, T, D] (unit direction per step) and kappa [B, T, 1] (confidence per step)
+      2. logits kappa_t * cos(d_t, w_j) over the N candidates, each column w_j a random wording of instruction j;
+         false negatives (same group, or cos(target key, key_j) > dupmask) masked out
+      3. loss: per-step cross-entropy against the label-smoothed target (smooth) with hard-negative weights (beta,
+         ramped in), averaged over each session's valid steps, then over sessions
+      4. backward, gradient clipping, AdamW step, EMA update, learning-rate schedule step
+    Returns the step's metrics: loss, rigid_loss (one-hot target, no hard-negative weights), avg_dist, lr, grad_norm,
+    beta (after the ramp).
+    """
+    model = st.model
+    model.train()
+    target = labels.target(batch.idx)
+    U, g = labels.U, labels.group
+    words = labels.sample_wordings()
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=batch.frames.is_cuda):
+        d, kappa = model(batch)
+    fn = M.false_negative_mask(U, g, U[target], g[target], target, exp.dupmask)
+    lg = M.logits(d, kappa, words, fn)
+    ramp = min(1.0, st.step / max(1.0, train.hard_neg_ramp * st.total)) if train.hard_neg_ramp > 0 else 1.0
+    beta = exp.beta * ramp
+    soft = M.smooth_targets(U, U[target], target, fn, exp.smooth, train.smooth_tau) if exp.smooth > 0 else None
+    lg_train = lg + M.hard_negative_bias(U, U[target], target, fn, beta)[:, None, :] if beta > 0 else lg
+    loss, _ = M.info_nce(lg_train, target, batch.valid, soft_targets=soft, fn_mask=fn)
+
+    st.opt.zero_grad(set_to_none=True)
+    loss.backward()
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train.grad_clip)
+    st.opt.step()
+    with torch.no_grad():
+        for pe, pm in zip(st.ema.parameters(), model.parameters()):
+            pe.lerp_(pm, 1.0 - train.ema)
+    lr = st.sched.get_last_lr()[0]
+    st.sched.step()
+    st.step += 1
+
+    with torch.no_grad():
+        rigid, _ = M.info_nce(lg.detach(), target, batch.valid)
+        dist = M.avg_dist(M.terminal(d.detach(), batch.lengths), U[target], g[target])
+        vals = torch.stack([loss.detach(), rigid, dist, grad_norm.float()]).tolist()     # one GPU sync
+    return {"loss": vals[0], "rigid_loss": vals[1], "avg_dist": vals[2], "lr": lr, "grad_norm": vals[3],
+            "beta": beta}
+
+
+def cosine_with_warmup(opt, warmup: int, total: int):
     def f(step):
         if step < warmup:
             return (step + 1) / warmup
-        p = min(1.0, (step - warmup) / max(1, total - warmup))
-        return 0.5 * (1 + math.cos(math.pi * p))
+        return 0.5 * (1 + math.cos(math.pi * min(1.0, (step - warmup) / max(1, total - warmup))))
     return torch.optim.lr_scheduler.LambdaLR(opt, f)
 
 
-def main(argv=None):
-    args = get_args(argv)
-    # Prefetch threads hand the GIL back and forth with this Python-heavy training loop; at the default 5 ms switch
-    # interval batch building ran ~4.5x slower (0.59 vs 0.13 s per batch measured with 6 threads at 0.5 ms).
+def make_state(exp: Experiment, train: TrainConfig, data: SessionData, device) -> tuple[TrainState, object]:
+    mcfg = model_config(exp, train, data)
+    model = build_model(mcfg, torch.from_numpy(data.text_vecs)).to(device)
+    ema = copy.deepcopy(model).eval()
+    for p in ema.parameters():
+        p.requires_grad_(False)
+    decay = [p for n, p in model.named_parameters() if p.ndim >= 2 and "emb" not in n]   # matrices, not embeddings
+    no_decay = [p for n, p in model.named_parameters() if not (p.ndim >= 2 and "emb" not in n)]
+    opt = torch.optim.AdamW([{"params": decay, "weight_decay": train.wd}, {"params": no_decay, "weight_decay": 0.0}],
+                            lr=exp.lr, betas=train.adam_betas)
+    total = exp.ep * (len(data.indices("train")) // exp.bs)       # epochs of N/bs steps (split batches count as steps)
+    if train.max_steps:
+        total = min(total, train.max_steps)
+    return TrainState(model, ema, opt, cosine_with_warmup(opt, train.warmup, total), total), mcfg
+
+
+def setup_process(seed: int):
+    # Prefetch threads hand the GIL back and forth with this Python-heavy loop; at the default 5 ms switch interval
+    # batch building ran ~4.5x slower.
     sys.setswitchinterval(5e-4)
-    torch.set_num_threads(4)                                 # several runs share a job's cores
-    # If a run stops making progress for 15 min, dump every thread's stack to its log (re-armed at each log interval).
-    faulthandler.dump_traceback_later(900, exit=False)
-    torch.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
+    torch.set_num_threads(4)                                   # several runs share a machine's cores
+    faulthandler.dump_traceback_later(900, exit=False)         # a run stuck for 15 min dumps every thread's stack
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    device = torch.device("cuda")
-    run_dir = paths.RUNS / args.run
-    run_dir.mkdir(parents=True, exist_ok=True)
-    log_f = open(run_dir / "log.jsonl", "a")
 
-    def log(rec):
-        rec = {"time": time.time(), **rec}
-        log_f.write(json.dumps(rec) + "\n")
-        log_f.flush()
-        print(json.dumps(rec), flush=True)
 
+def _git() -> dict:
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "wfemb"], capture_output=True, text=True,
+                                    timeout=10).stdout.strip())
+        return {"git_commit": sha or None, "git_dirty": dirty}
+    except Exception:
+        return {"git_commit": os.environ.get("WFEMB_GIT_COMMIT"), "git_dirty": None}
+
+
+def training_loop(cfg: RunConfig) -> dict | None:
+    exp, train = cfg.experiment, cfg.train
+    run_dir = cfg.run_dir
+    if (run_dir / "final.json").exists() and not cfg.overwrite:
+        print(f"{exp.id}: already finished ({run_dir}); overwrite=True to rerun", flush=True)
+        return None
+    setup_process(exp.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     t0 = time.time()
-    if args.keys_dir:
-        paths.KEYS = Path(args.keys_dir)
-    extras = [x for x in args.extra.split(",") if x] + (["effect"] if args.use_effect else [])
-    data = SessionData(Path(args.frames_dir), use_crop=args.use_crop, frames_mode=args.frames_mode, device=device,
-                       extras=extras, avg_grid=args.avg_grid)
-    if args.center_keys:
-        tr = data.indices("train")
-        mu = data.keys[tr].mean(0, keepdims=True)
-        nz = lambda x: x / np.linalg.norm(x, axis=1, keepdims=True)
-        data.keys = nz(data.keys - mu).astype(np.float32)
-        if len(data.para_keys):
-            data.para_keys = nz(data.para_keys - mu).astype(np.float32)
-    if args.no_para:
-        data.para_count = np.zeros_like(data.para_count)
-    train_idx = data.indices("train")
-    print(f"data loaded in {time.time() - t0:.0f}s: {len(train_idx)} train sessions, "
-          f"{data.frames.total} frames, n_tok={data.frames.n_tok}", flush=True)
+    data = SessionData(cfg.data, exp)
+    labels = TrainLabels(data, device)
+    st, mcfg = make_state(exp, train, data, device)
+    n_params = sum(p.numel() for p in st.model.parameters())
+    out = RunWriter(run_dir, fresh=True)
+    out.config({"id": exp.id, "experiment": vars_of(exp), "train": chz.asdict(train), "eval": chz.asdict(cfg.eval),
+                "data": chz.asdict(cfg.data), "model": mcfg.to_dict(),
+                "meta": {**_git(), "host": socket.gethostname(), "launcher": cfg.launcher,
+                         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "n_params": n_params,
+                         "n_train_sessions": len(labels), "steps_per_epoch": len(labels) // exp.bs,
+                         "total_steps": st.total, "torch": torch.__version__}})
+    print(f"{exp.id}\n{n_params / 1e6:.2f}M params, {st.total} steps, data loaded in {time.time() - t0:.0f}s",
+          flush=True)
 
-    U = torch.from_numpy(data.keys[train_idx]).to(device)                # N x D, frozen
-    if args.para_negatives:
-        P_keys = torch.from_numpy(data.para_keys).to(device)
-        P_off = torch.from_numpy(data.para_offset[train_idx]).to(device)
-        P_cnt = torch.from_numpy(data.para_count[train_idx].astype(np.int64)).to(device)
+    def checkpoint(name):
+        torch.save({"model": st.ema.state_dict(), "model_cfg": mcfg.to_dict(), "id": exp.id,
+                    "experiment": vars_of(exp), "step": st.step}, run_dir / name)
 
-    def sample_wordings():
-        """U with each column replaced by a uniformly drawn wording of that instruction (original or paraphrase)."""
-        pick = (torch.rand(len(P_cnt), device=device) * (P_cnt + 1).float()).long()
-        alt = P_keys[(P_off + pick - 1).clamp(min=0)]
-        return torch.where((pick > 0)[:, None], alt, U)
-    gU = torch.from_numpy(data.group[train_idx]).to(device)
-    pos_in_U = np.full(len(data.sessions), -1, np.int64)
-    pos_in_U[train_idx] = np.arange(len(train_idx))
-
-    xf = args.arch != "pool_gru"
-    cfg = ModelConfig(d_key=U.shape[1], d_vis=data.frames.dim, n_tok=data.frames.n_tok, d=args.d,
-                      h=args.d if xf else args.h,
-                      n_queries=args.n_queries, n_keys=data.n_keys, d_text=data.text_vecs.shape[1],
-                      k_min=args.k_min, k_max=args.k_max, dropout=args.dropout,
-                      tok_drop=args.tok_drop, prev_query=args.prev_query, gru_layers=args.gru_layers,
-                      keep_bias=args.keep_bias, n_mix=args.n_mix, compress_latents=args.compress_latents,
-                      compress_blocks=args.compress_blocks, hist_queries=args.hist_queries,
-                      static_queries=args.static_queries, n_heads=args.n_heads if xf else 8,
-                      arch=args.arch, n_layers=args.n_layers, n_kv_heads=args.n_kv_heads, d_head=args.d_head,
-                      mlp_ratio=args.mlp_ratio, qkv_mode=args.qkv_mode,
-                      h_join=args.h_join % args.n_layers if xf else 0, ev_pos=not args.no_ev_pos,
-                      e_max=int(data.ev["ev_type"].shape[1]), xf_ckpt=not args.no_xf_ckpt)
-    model = build_model(cfg, torch.from_numpy(data.text_vecs)).to(device)
-    ema = None
-    if args.ema > 0:
-        ema = copy.deepcopy(model)
-        for p_ in ema.parameters():
-            p_.requires_grad_(False)
-
-    def ema_update():
-        with torch.no_grad():
-            for pe, pm in zip(ema.parameters(), model.parameters()):
-                pe.lerp_(pm, 1.0 - args.ema)
-            for be, bm in zip(ema.buffers(), model.buffers()):
-                be.copy_(bm)
-    n_params = sum(p.numel() for p in model.parameters())
-    decay = [p for n, p in model.named_parameters() if p.ndim >= 2 and "emb" not in n]
-    no_decay = [p for n, p in model.named_parameters() if not (p.ndim >= 2 and "emb" not in n)]
-    opt = torch.optim.AdamW([{"params": decay, "weight_decay": args.wd},
-                             {"params": no_decay, "weight_decay": 0.0}], lr=args.lr, betas=(0.9, 0.98))
-    steps_per_epoch = len(train_idx) // args.batch
-    total = int(args.epochs * steps_per_epoch)
-    if args.max_steps:
-        total = min(total, args.max_steps)
-    sched = cosine_with_warmup(opt, args.warmup, total)
-    with open(run_dir / "config.json", "w") as f:
-        json.dump({"args": vars(args), "model": dataclasses.asdict(cfg), "n_params": n_params,
-                   "steps_per_epoch": steps_per_epoch, "total_steps": total,
-                   "slurm_job": os.environ.get("SLURM_JOB_ID")}, f, indent=1)
-    print(f"{n_params / 1e6:.2f}M params, {total} steps ({steps_per_epoch}/epoch)", flush=True)
-
-    best = {}
-    tracked = {"loss", "key_R@5", "jsession_R@5_cross_app", "jsession_nDCG@10_cross_app", args.select_on}
-    step, epoch = 0, 0
-    t_last, data_wait = time.time(), 0.0
-    run_loss, run_n = 0.0, 0
-    done = False
-    while not done:
-        batches = length_bucketed_batches(data.length, train_idx, args.batch, rng, max_frames=args.max_frames)
-        sd = args.step_drop
-        if args.step_drop_anneal > 0:
-            n_ep = total / steps_per_epoch
-            start = (1 - args.step_drop_anneal) * n_ep
-            if epoch >= start:
-                sd = args.step_drop * max(0.0, 1 - (epoch - start) / (args.step_drop_anneal * n_ep))
-        it = iter(Prefetcher(data, batches, device, max_len=args.max_len or None, step_drop=sd,
-                             seed=args.seed * 1000 + epoch, max_rows=args.max_frames))
-        while True:
-            tw = time.time()
-            try:
-                b, _ = next(it)
-            except StopIteration:
+    best = float("inf")
+    t_run = time.time()
+    while st.step < st.total:
+        batches = train_batches(data, exp, train, cfg.data, st.epoch, device)
+        while st.step < st.total:
+            t_wait = time.time()
+            batch = next(batches, None)
+            if batch is None:
                 break
-            data.finalize(b)
-            data_wait += time.time() - tw
-            bidx = b.idx.cpu().numpy()
-            # paraphrase augmentation: a random wording of each instruction, re-drawn every time (main thread rng)
-            target = torch.from_numpy(pos_in_U[bidx]).to(device)
-            if args.para_negatives:
-                U_step = sample_wordings()
-                pos_keys = U_step[target]
-            else:
-                U_step = U
-                pos_keys = torch.from_numpy(data.sample_positive_keys(bidx, rng)).to(device, non_blocking=True)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                d, k, logpi = model(b)
-            fn = false_negative_mask(U, gU, U[target], gU[target], target, args.theta_fn)
-            soft = (smooth_targets(U, U[target], target, fn, args.label_smooth, args.smooth_tau)
-                    if args.label_smooth > 0 else None)
-            bias = None
-            if args.hard_neg > 0:
-                ramp = min(1.0, step / max(1.0, args.hard_neg_ramp * total)) if args.hard_neg_ramp > 0 else 1.0
-                bias = hard_negative_bias(U, U[target], target, fn, args.hard_neg * ramp)
-            loss = info_nce(d, k, b.valid.float(), U_step, pos_keys, target, fn, soft_targets=soft, logpi=logpi,
-                            logit_bias=bias)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            if ema is not None:
-                ema_update()
-            sched.step()
-            step += 1
-            run_loss += loss.item()
-            run_n += 1
-            if step % args.log_every == 0:
+            t_step = time.time()
+            m = training_step(st, batch, labels, exp, train)
+            out.step({"step": st.step, "epoch": st.epoch, "time": round(time.time() - t_run, 3), **m,
+                      "data_s": round(t_step - t_wait, 4), "step_s": round(time.time() - t_step, 4)})
+            if st.step % 50 == 0:
                 faulthandler.cancel_dump_traceback_later()
                 faulthandler.dump_traceback_later(900, exit=False)
-                dt = time.time() - t_last
-                log({"step": step, "epoch": epoch, "train_loss": run_loss / run_n, "lr": sched.get_last_lr()[0],
-                     "grad_norm": float(gn), "kappa_mean": float(k[b.valid].mean()),
-                     "steps_per_s": args.log_every / dt, "data_wait_frac": data_wait / dt})
-                t_last, data_wait, run_loss, run_n = time.time(), 0.0, 0.0, 0
-            if step % args.eval_every == 0 or step == total:
-                eval_model = ema if ema is not None else model
-                m = evaluate(eval_model, data, "val", device, args.eval_theta_fn, U, train_idx)
-                rec = {"step": step, "epoch": epoch, "max_mem_gb": torch.cuda.max_memory_allocated() / 2**30,
-                       **{f"val_{k_}": v for k_, v in m.items()}}
-                for csp in filter(None, args.curve_splits.split(",")):          # learning curves only
-                    cm = evaluate(eval_model, data, csp, device, args.eval_theta_fn, U, train_idx,
-                                  max_sessions=args.curve_n if csp == "train" else None)
-                    rec.update({f"{csp}_{k_}": v for k_, v in cm.items()})
-                log(rec)
-                state = {"model": eval_model.state_dict(), "cfg": dataclasses.asdict(cfg), "args": vars(args),
-                         "step": step}
-                sel = args.select_on if args.select_on in m else "loss"   # metric may be unavailable
-                for key in tracked:
-                    if key not in m or m[key] != m[key]:                 # missing or nan
-                        continue
-                    if key not in best or (m[key] < best[key] if key == "loss" else m[key] > best[key]):
-                        best[key] = m[key]
-                        if key == sel:
-                            torch.save(state, run_dir / "best.pt")
-                torch.save(state, run_dir / "last.pt")
-                t_last = time.time()
-            if step >= total:
-                done = True
-                break
-        epoch += 1
+            if st.step % cfg.eval.eval_steps == 0 or st.step == st.total:
+                v = evaluate(st.ema, data, "val", labels, cfg.eval, device, cfg.data)
+                row = {"step": st.step, "epoch": st.epoch, "time": round(time.time() - t_run, 3), **v,
+                       "max_mem_gb": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else None}
+                out.eval(row)
+                print("[eval]", dumps(row), flush=True)
+                if v["val_loss"] < best:
+                    best = v["val_loss"]
+                    checkpoint("best.pt")
+                checkpoint("last.pt")
+        batches.close()                       # returns the prefetcher's in-flight buffers
+        st.epoch += 1
 
-    # final: best checkpoint on val + test (held-out apps), with the nuisance probe
-    state = torch.load(run_dir / "best.pt", map_location=device)
-    model.load_state_dict(state["model"])
-    final = {"best_step": state["step"], "best": best, "select_on": args.select_on}
+    # final: the checkpoint with the lowest val_loss, on val and test
+    state = torch.load(run_dir / "best.pt", map_location=device, weights_only=False)
+    st.ema.load_state_dict(state["model"])
+    final = {"best_step": state["step"], "selected_on": "val_loss"}
     for split in ("val", "test"):
-        m = evaluate(model, data, split, device, args.eval_theta_fn, U, train_idx, full=True)
-        final[split] = m
-    with open(run_dir / "final.json", "w") as f:
-        json.dump(final, f, indent=1)
-    log({"final": True, **{f"{sp}_{k_}": v for sp in ("val", "test") for k_, v in final[sp].items()
-                           if not isinstance(v, list)}})
-    print(f"total time {(time.time() - t0) / 60:.1f} min", flush=True)
+        final.update(evaluate(st.ema, data, split, labels, cfg.eval, device, cfg.data))
+    final["train_minutes"] = round((time.time() - t0) / 60, 2)
+    out.final(final)
+    out.close()
+    faulthandler.cancel_dump_traceback_later()
+    print(format_metrics(final, f"{exp.id}\nbest step {state['step']} of {st.total}, "
+                                f"{final['train_minutes']:.1f} min"), flush=True)
+    return final
+
+
+def main(cfg: RunConfig):
+    return training_loop(cfg)
 
 
 if __name__ == "__main__":
-    main()
+    chz.nested_entrypoint(main)

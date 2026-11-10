@@ -1,8 +1,0 @@
-# Round 2: crop on everywhere (r1 winner). Paraphrase fix vs none, then regularizers against memorization
-# (r1: kappa at step 0 rises 31 -> 87 as the model learns to recognize training sessions from the first frame).
---run r2_crop_nopara --use_crop --no_para
---run r2_crop_paraneg --use_crop --para_negatives
---run r2_crop_paraneg_d02 --use_crop --para_negatives --dropout 0.2
---run r2_crop_paraneg_td25 --use_crop --para_negatives --tok_drop 0.25
---run r2_crop_paraneg_small --use_crop --para_negatives --d 384 --h 512
---run r2_crop_paraneg_reg --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1

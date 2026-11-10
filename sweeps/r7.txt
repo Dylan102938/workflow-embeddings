@@ -1,9 +1,0 @@
-# Round 7: base = r6_combo_ls10 (val 4.218 / test 5.321); still overfits after ~half of 45 epochs.
-#   --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1
---run r7_seed1 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1 --seed 1
---run r7_sd50 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.5 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1
---run r7_reg --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1
---run r7_k75 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 75 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1
---run r7_ls20 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2
---run r7_tau10 --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1 --smooth_tau 0.1
---run r7_tiny --use_crop --para_negatives --dropout 0.2 --tok_drop 0.25 --wd 0.1 --d 256 --h 384 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.1

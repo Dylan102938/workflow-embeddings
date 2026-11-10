@@ -227,3 +227,9 @@ runs/
 *.pt
 sweeps/groups/
 demo/bundle/
+
+# results tree, demo bundles, legacy imports, rnn job groups
+results/
+dashboard/bundles/
+legacy_runs/
+jobs/.groups/

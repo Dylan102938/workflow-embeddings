@@ -1,15 +1,15 @@
 #!/bin/bash
 # Build frozen-encoder frame caches on Baseten: AgentNet screenshots (public HF dataset) + our private derived data
 # (Dylan123/wfemb-data: prepared sessions/events, key sets, PCA bases fitted on rnn) -> dense caches in the team cache.
-# Usage: bash baseten/build.sh "SPEC [SPEC ...]"   SPEC = siglip2:16 | siglip2:24 | qwen25vl:16
+# Usage: bash baseten/build.sh "SPEC [SPEC ...]"   SPEC = siglip2:<grid> (e.g. siglip2:24 -> patch 576)
 set -euo pipefail
 cd "$BT_WORKING_DIR"
-NEED_FLASH_ATTN=1 source baseten/setup.sh
-SPECS=${1:-"siglip2:16 siglip2:24 qwen25vl:16"}
+source baseten/setup.sh
+SPECS=${1:-"siglip2:16 siglip2:24"}
 export WFEMB_DATA=$BT_SCRATCH_DIR/data WFEMB_BULK=$BT_SCRATCH_DIR/bulk
 mkdir -p "$WFEMB_DATA" "$WFEMB_BULK" "$TEAM/data" "$TEAM/bulk"
 t0=$(date +%s)                                  # inputs were downloaded to the team cache by baseten/download.sh
-cp -r "$TEAM"/data/{prepared,keys,keys_openai,keys_openai_p2} "$WFEMB_DATA/"
+cp -r "$TEAM"/data/{prepared,keys,keys_openai} "$WFEMB_DATA/"
 cp "$TEAM"/data/bulk/*.npz "$WFEMB_BULK/"
 ln -sfn "$TEAM/raw/agentnet_raw" "$WFEMB_DATA/agentnet_raw"   # read in place: the job's local disk quota is ~300 GB
 echo "data ready in $(( $(date +%s) - t0 ))s: $(du -sh "$WFEMB_DATA/agentnet_raw" | cut -f1) raw"
@@ -23,14 +23,13 @@ NSH=8                                         # shards per cache, built in waves
 for spec in $SPECS; do
     enc=${spec%%:*}; grid=${spec##*:}
     name=frames_dense
-    if [ "$enc" = qwen25vl ]; then name+=_qwen25vl; fi
     if [ "$grid" != 16 ]; then name+=_g$grid; fi
     part="$TEAM/bulk/$name.partial"; mkdir -p "$part"
     t1=$(date +%s)
     for ((w = 0; w < NSH; w += NG)); do
         pids=()
         for ((g = 0; g < NG && w + g < NSH; g++)); do
-            CUDA_VISIBLE_DEVICES=$g python -m wfemb.cache_frames --mode dense --encoder_type "$enc" --grid "$grid" \
+            CUDA_VISIBLE_DEVICES=$g python -m wfemb.prep.cache_frames --mode dense --grid "$grid" \
                 --pca_dim 512 --shard $(( w + g )) --num_shards $NSH --workers "$W" \
                 > "$BT_SCRATCH_DIR/cache_${enc}_${grid}_$(( w + g )).log" 2>&1 &
             pids+=($!)

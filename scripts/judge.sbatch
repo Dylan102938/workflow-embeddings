@@ -10,4 +10,4 @@
 set -euo pipefail
 source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
 set -a; source "$REPO/.env"; set +a      # API keys (gitignored)
-$UV run python -m wfemb.judge_pool "$@"
+$UV run python -m wfemb.prep.judge_pool "$@"

@@ -1,4 +1,0 @@
-# Round 14a (A100, existing 8x8 averaged cache, NO click-centered crops).
-#   B0 = best config minus --use_crop: --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query
---run r14_nocrop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query
---run r14_nocrop_hist --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --hist_queries 4 --static_queries 4

@@ -8,4 +8,4 @@
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 set -euo pipefail
 source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
-$UV run python -m wfemb.prepare "$@"
+$UV run python -m wfemb.prep.prepare "$@"

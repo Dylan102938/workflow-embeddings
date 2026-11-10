@@ -1,9 +1,0 @@
-# Round 10: r9 plateaued (val ~4.07-4.13, test ~5.11-5.15). Structural: GRU update gate biased toward keeping
-# state (design doc), step-drop annealed to 0 at the end (train/eval density mismatch), depth, width.
-#   base: --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query
---run r10_keep1 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --keep_bias 1.0
---run r10_keep2 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --keep_bias 2.0
---run r10_sdanneal --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --step_drop_anneal 0.3
---run r10_keep1_anneal --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --keep_bias 1.0 --step_drop_anneal 0.3
---run r10_gru2 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --gru_layers 2
---run r10_d512 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 512 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query

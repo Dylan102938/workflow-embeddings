@@ -1,8 +1,0 @@
-# Round 9: base = r8_prevq_reg_ls20 (val 4.078 / test 5.152).
-#   --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query
---run r9_best_seed1 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --seed 1
---run r9_sep --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query sep
---run r9_sep_seed1 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query sep --seed 1
---run r9_ls30 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.3 --prev_query
---run r9_k75 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 75 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query
---run r9_q12 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 12 --epochs 45 --label_smooth 0.2 --prev_query

@@ -1,4 +1,4 @@
-from wfemb.actions import parse_code
+from wfemb.prep.actions import parse_code
 
 
 def test_click_and_cursor():

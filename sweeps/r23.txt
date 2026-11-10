@@ -1,8 +1,0 @@
-# Round 23: overfitting of the best transformer (r19_xf4_late: val 3.422 at step 6500 of 12690, 3.591 at the end;
-# test 4.336). Base = r19_xf4_late (tok_drop 0.4, step_drop 0.4, wd 0.1, label_smooth 0.2, 45 epochs).
-#  - 25 epochs: the cosine schedule ends near where the 45-epoch run peaks
-#  - stronger regularization: token dropout 0.5, step dropout 0.5, weight decay 0.2
-#  - label smoothing 0.3
---run r23_late_ep25 --para_negatives --dropout 0.3 --d 384 --k_max 50 --lr 5e-4 --ema 0.999 --frames_dir /nas/ttl=60d/dfeng/workflow-embeddings/frames_dense --keys_dir /nas/ucb/dfeng/data/workflow-embeddings/keys_openai --eval_theta_fn 0.8 --theta_fn 0.8 --arch xf --n_heads 6 --d_head 64 --n_layers 4 --h_join -1 --tok_drop 0.4 --step_drop 0.4 --wd 0.1 --label_smooth 0.2 --epochs 25
---run r23_late_reg --para_negatives --dropout 0.3 --d 384 --k_max 50 --lr 5e-4 --ema 0.999 --frames_dir /nas/ttl=60d/dfeng/workflow-embeddings/frames_dense --keys_dir /nas/ucb/dfeng/data/workflow-embeddings/keys_openai --eval_theta_fn 0.8 --theta_fn 0.8 --arch xf --n_heads 6 --d_head 64 --n_layers 4 --h_join -1 --tok_drop 0.5 --step_drop 0.5 --wd 0.2 --label_smooth 0.2 --epochs 45
---run r23_late_ls3 --para_negatives --dropout 0.3 --d 384 --k_max 50 --lr 5e-4 --ema 0.999 --frames_dir /nas/ttl=60d/dfeng/workflow-embeddings/frames_dense --keys_dir /nas/ucb/dfeng/data/workflow-embeddings/keys_openai --eval_theta_fn 0.8 --theta_fn 0.8 --arch xf --n_heads 6 --d_head 64 --n_layers 4 --h_join -1 --tok_drop 0.4 --step_drop 0.4 --wd 0.1 --label_smooth 0.3 --epochs 45

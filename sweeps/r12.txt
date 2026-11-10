@@ -1,8 +1,0 @@
-# Round 12: mixture readout (pseudocode upgrade 1). Early steps carry the highest loss (entropy 5.7 at t=0,
-# true-key R@5 0.14): a single direction cannot put mass on several distant plausible intents.
-#   base (r8_prevq_reg_ls20, val 4.078 / test 5.152): --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query
---run r12_mix2 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --n_mix 2
---run r12_mix4 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --n_mix 4 --max_frames 2048
---run r12_mix4_seed1 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --n_mix 4 --max_frames 2048 --seed 1
---run r12_mix8 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 50 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --n_mix 8 --max_frames 1024
---run r12_mix4_k75 --use_crop --para_negatives --dropout 0.3 --tok_drop 0.4 --wd 0.1 --d 384 --h 512 --step_drop 0.4 --k_max 75 --lr 5e-4 --ema 0.999 --n_queries 8 --epochs 45 --label_smooth 0.2 --prev_query --n_mix 4 --max_frames 2048

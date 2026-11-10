@@ -37,6 +37,15 @@ from urllib.parse import parse_qs, unquote, urlsplit
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 STATIC = HERE / "static"
+# metrics that older runs still have in their files but are no longer tracked (tracked ones: docs/EXPERIMENTS.md)
+DROPPED_METRIC_PARTS = ("judged_",)
+
+
+def without_dropped_metrics(row):
+    if not isinstance(row, dict):
+        return row
+    return {key: value for key, value in row.items() if not any(part in key for part in DROPPED_METRIC_PARTS)}
+
 
 # The best model so far (read from docs/EXPERIMENTS.md at startup; this is the fallback). Only used to order
 # variables and to mark the segments of an id that differ from it; every run's variables come from its own folder path.
@@ -157,7 +166,7 @@ class JsonCache:
         if hit and hit[0] == sig:
             return hit[1]
         try:
-            val = json.loads(p.read_text(encoding="utf-8"))
+            val = without_dropped_metrics(json.loads(p.read_text(encoding="utf-8")))
         except (OSError, ValueError) as e:
             val = {"_error": f"{p.name}: {e}"}
         self.c.put(str(p), (sig, val))
@@ -224,7 +233,7 @@ class Table:
         if not line:
             return
         try:
-            row = json.loads(line)
+            row = without_dropped_metrics(json.loads(line))
         except ValueError:
             if not provisional:
                 self.bad += 1
@@ -290,7 +299,7 @@ def tail_row(p: Path, cache: LRU):
                     if not line:
                         continue
                     try:
-                        r = json.loads(line)
+                        r = without_dropped_metrics(json.loads(line))
                     except ValueError:
                         continue
                     if isinstance(r, dict):

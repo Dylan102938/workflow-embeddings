@@ -159,10 +159,8 @@ def emb_path(run):
 
 def load_embeddings(A: Assets):
     z = np.load(emb_path(A.run))
-    out = {}
-    for s, o, n in zip(z["sidx"], z["offset"], z["length"]):
-        out[int(s)] = (z["d"][o:o + n].astype(np.float32), z["k"][o:o + n])
-    return out
+    d, k = z["d"], z["k"]                                  # read each array once (NpzFile re-reads on every access)
+    return {int(s): (d[o:o + n].astype(np.float32), k[o:o + n]) for s, o, n in zip(z["sidx"], z["offset"], z["length"])}
 
 
 def scores(A: Assets, d: np.ndarray, k: np.ndarray, topk: int = 5, true_text: str | None = None):
@@ -255,8 +253,9 @@ def cmd_background(args):
         last_rank.append(int(sc["true_rank"][1]))
         ent0.append(float(sc["entropy"][0]))
         entT.append(float(sc["entropy"][1]))
+    cent_n = cent / np.linalg.norm(cent, axis=1, keepdims=True)
     np.savez(pca_path(args.run), mu=mu, W=W, explained=np.array(explained), E=E.astype(np.float16), sidx=sidx,
-             cluster=lab, first_rank=first_rank, last_rank=last_rank, ent0=ent0, entT=entT)
+             cluster=lab, cent=cent_n, first_rank=first_rank, last_rank=last_rank, ent0=ent0, entT=entT)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     bg = {"run": args.run, "n": int(len(sidx)), "explained": [round(v, 4) for v in explained],
@@ -318,6 +317,11 @@ def build_workflow(A, pca, meta, d, k, ev, texts, images, topk=5, bg_index=None,
     if bg_index is not None:
         sims[bg_index] = -2
     nb = np.argsort(-sims)[:8]
+    clus = (D @ pca["cent"].T).argmax(1)                          # k-means cluster of each step's embedding
+    S_all = D @ E.T                                                 # [L, n_test]
+    if bg_index is not None:
+        S_all[:, bg_index] = -2
+    near = np.argsort(-S_all, axis=1)[:, :3]
     steps = []
     for t in range(len(d)):
         acts = step_actions(A, ev, t, texts)
@@ -331,6 +335,8 @@ def build_workflow(A, pca, meta, d, k, ev, texts, images, topk=5, bg_index=None,
                      bool(meta.get("instruction") is not None and A.bank_text[int(i)] == meta.get("instruction"))]
                     for p, i in zip(sc["top_p"][t], sc["top_i"][t])],
             "xy": [round(float(v), 4) for v in xy[t]],
+            "cluster": int(clus[t]),
+            "near": [[int(i), round(float(S_all[t, i]), 4)] for i in near[t]],
         })
     return {"version": 1, "run": A.run, **meta, "n_steps": len(d), "bank_size": len(A.bank_text),
             "true_in_bank": sc["true_rank"] is not None, "bg_index": bg_index,
@@ -584,14 +590,14 @@ def encode_frames(imgs, device, pca_file: str | None = None, grid: int = 16, pat
         _ENC["siglip"] = (proc, vis, torch.from_numpy(z["mean"]).to(device), torch.from_numpy(z["comps"]).to(device))
     proc, vis, mean, comps = _ENC["siglip"]
     out = []
-    for im in imgs:
-        g = proc(images=[im], max_num_patches=patches, return_tensors="pt")
-        h = vis(pixel_values=g["pixel_values"].to(device, torch.bfloat16),
-                attention_mask=g["pixel_attention_mask"].to(device),
-                spatial_shapes=g["spatial_shapes"].to(device)).last_hidden_state
-        x = pool_grid(h, g["spatial_shapes"], (grid, grid))
-        out.append(to_bf16_bits((x[0] - mean) @ comps))
-    return np.stack(out)
+    for s in range(0, len(imgs), 32):                     # batches of 32 padded to `patches`, as the cache was built
+        g = [proc(images=[im], max_num_patches=patches, return_tensors="pt") for im in imgs[s:s + 32]]
+        ss = torch.cat([x["spatial_shapes"] for x in g])
+        h = vis(pixel_values=torch.cat([x["pixel_values"] for x in g]).to(device, torch.bfloat16),
+                attention_mask=torch.cat([x["pixel_attention_mask"] for x in g]).to(device),
+                spatial_shapes=ss.to(device)).last_hidden_state
+        out.append(to_bf16_bits((pool_grid(h, ss, (grid, grid)) - mean) @ comps))
+    return np.concatenate(out)
 
 
 @torch.no_grad()

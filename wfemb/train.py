@@ -1,6 +1,6 @@
 """Training (docs/EXPERIMENTS.md). One run per process; everything it records goes to its results folder.
 
-  python -m wfemb.train id=<run id>                              # e.g. a line of a jobs/*.txt file
+  python -m wfemb.train id=<run id>                              # e.g. a line of jobs.txt
   python -m wfemb.train exp.beta=2 exp.seed=1                    # the best model with changes
   python -m wfemb.train id=<run id> train.max_steps=200 results=/tmp/results     # quick test
 
@@ -44,23 +44,6 @@ class TrainState:
 
 
 def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experiment, train: TrainConfig) -> dict:
-    """One optimizer update.
-
-    Inputs
-      batch   B sessions padded to T steps (data.Batch, on the GPU): per step the screen patch tokens
-              [patch, 512], the input events, and valid [B, T] marking real steps
-      labels  the candidates: keys U [N, D] of all N training instructions with their instruction groups; each
-              session's target is the column of its own instruction (labels.target)
-    Update
-      1. forward: d [B, T, D] (unit direction per step) and kappa [B, T, 1] (confidence per step)
-      2. logits kappa_t * cos(d_t, w_j) over the N candidates, each column w_j a random wording of instruction j;
-         false negatives (same group, or cos(target key, key_j) > train.dupmask) masked out
-      3. loss: per-step cross-entropy against the label-smoothed target (smooth) with hard-negative weights (beta,
-         ramped in), averaged over each session's valid steps, then over sessions
-      4. backward, gradient clipping, AdamW step, EMA update, learning-rate schedule step
-    Returns the step's metrics: loss, rigid_loss (one-hot target, no hard-negative weights), avg_dist, lr, grad_norm,
-    beta (after the ramp).
-    """
     model = st.model
     model.train()
     target = labels.target(batch.idx)
@@ -68,6 +51,7 @@ def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experi
     words = labels.sample_wordings()
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=batch.frames.is_cuda):
         d, kappa = model(batch)
+
     fn = M.false_negative_mask(U, g, U[target], g[target], target, train.dupmask)
     lg = M.logits(d, kappa, words, fn)
     ramp = min(1.0, st.step / max(1.0, train.hard_neg_ramp * st.total)) if train.hard_neg_ramp > 0 else 1.0
@@ -83,6 +67,7 @@ def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experi
     with torch.no_grad():
         for pe, pm in zip(st.ema.parameters(), model.parameters()):
             pe.lerp_(pm, 1.0 - train.ema)
+
     lr = st.sched.get_last_lr()[0]
     st.sched.step()
     st.step += 1
@@ -91,6 +76,7 @@ def training_step(st: TrainState, batch: Batch, labels: TrainLabels, exp: Experi
         rigid, _ = M.info_nce(lg.detach(), target, batch.valid)
         dist = M.avg_dist(M.terminal(d.detach(), batch.lengths), U[target], g[target])
         vals = torch.stack([loss.detach(), rigid, dist, grad_norm.float()]).tolist()     # one GPU sync
+
     return {"loss": vals[0], "rigid_loss": vals[1], "avg_dist": vals[2], "lr": lr, "grad_norm": vals[3],
             "beta": beta}
 

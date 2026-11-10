@@ -10,11 +10,11 @@
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # Several runs in one job, packed onto its GPUs (run i -> GPU i mod #GPUs). Frames are read from the NAS cache with
 # preadv through the page cache (storage/frames.py explains why not mmap or a /dev/shm copy).
-# Usage: sbatch [--gres=gpu:G --mem=.. --cpus-per-task=..] scripts/multi.sbatch GROUP_FILE
-#   GROUP_FILE: one run per line: a run id, optionally followed by overrides (train.max_frames=2048 ...)
+# Usage: sbatch [--gres=gpu:G --mem=.. --cpus-per-task=..] runners/slurm/multi.sbatch GROUP_FILE
+#   GROUP_FILE: one run per line: a run id, optionally followed by overrides (written by runners/slurm/submit.sh)
 # Results: $WFEMB_DATA/results/<run folder>/ (fetch locally: python -m wfemb.storage.fetch rnn)
 set -euo pipefail
-source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
+source /nas/ucb/dfeng/code/workflow-embeddings/runners/slurm/env.sh
 GROUP=$1
 echo "git: $(git rev-parse --short HEAD)  host: $(hostname)  gpus: $CUDA_VISIBLE_DEVICES"
 export WFEMB_RESULTS=$WFEMB_DATA/results WFEMB_LAUNCHER="slurm:$SLURM_JOB_ID"

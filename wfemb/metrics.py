@@ -66,6 +66,7 @@ def info_nce(lg, target, valid, soft_targets=None, fn_mask=None):
     else:
         logp = lg.log_softmax(-1).masked_fill(fn_mask[:, None, :], 0.0)     # masked columns have q = 0
         ce = -(soft_targets[:, None, :] * logp).sum(-1)
+
     valid = valid.float()
     ce = ce * valid
     return (ce.sum(1) / valid.sum(1)).mean(), ce

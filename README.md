@@ -22,9 +22,8 @@ wfemb/
   prep/          one-time data preparation (sessions, actions, frame caches, text embeddings, keys, judged pools)
   demo/          exports Intent Replay bundles for the dashboard
 dashboard/       local results dashboard (runs, curves, seed aggregation, ablations, job queue, demo viewer)
-jobs/            job files: one run id per line (+ optional overrides)
-baseten/         Baseten jobs (data download, frame-cache build, training)
-scripts/         rnn (Slurm) jobs
+jobs.txt         the run queue: run ids in named sections, one section per launch
+runners/         baseten/ (data download, frame-cache build, training) and slurm/ (rnn jobs, legacy import)
 results/         raw results of every run, one folder level per id segment (gitignored)
 ```
 
@@ -36,8 +35,9 @@ python -m wfemb.config exp.beta=2                         # id, results folder a
 python -m wfemb.train id=<run id>                         # train one run (or exp.<var>=... overrides)
 python -m wfemb.eval id=<run id>                          # test metrics of its best checkpoint
 
-WFEMB_JOB=<name> WFEMB_GPUS=2 truss train push baseten/train_config.py --job-name <name>   # jobs/<name>.txt on Baseten
-scripts/submit.sh jobs/<name>.txt                         # on rnn (Slurm), runs packed 3 per GPU job
+python -m wfemb.storage.jobs list                         # jobs.txt sections and each run's status
+WFEMB_JOB=<section> WFEMB_GPUS=2 truss train push runners/baseten/train_config.py --job-name <section>   # on Baseten
+runners/slurm/submit.sh <section>                         # on rnn (Slurm), runs packed 3 per GPU job
 
 python -m wfemb.storage.fetch baseten                     # results -> ./results  (or: rnn)
 python dashboard/server.py                                # http://127.0.0.1:8765

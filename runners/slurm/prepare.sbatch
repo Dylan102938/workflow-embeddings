@@ -7,5 +7,5 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 set -euo pipefail
-source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
+source /nas/ucb/dfeng/code/workflow-embeddings/runners/slurm/env.sh
 $UV run python -m wfemb.prep.prepare "$@"

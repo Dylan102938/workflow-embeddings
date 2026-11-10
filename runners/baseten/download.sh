@@ -1,9 +1,9 @@
 #!/bin/bash
 # Download AgentNet (public) + our private derived data into the persistent team cache, with retries (hf download
-# resumes; a dropped connection killed the first build). Run as a CPU-only job: bash baseten/download.sh
+# resumes; a dropped connection killed the first build). Run as a CPU-only job: bash runners/baseten/download.sh
 set -uo pipefail
 cd "$BT_WORKING_DIR"
-source baseten/setup.sh
+source runners/baseten/setup.sh
 retry() { for i in 1 2 3 4 5 6 7 8; do "$@" && return 0; echo "attempt $i failed; retrying in 30s"; sleep 30; done; return 1; }
 t0=$(date +%s)
 retry hf download Dylan123/wfemb-data --repo-type dataset --local-dir "$TEAM/data" --token "$HF_TOKEN" --exclude "runs/*" >/dev/null || exit 1

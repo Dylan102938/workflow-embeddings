@@ -3,9 +3,9 @@ results tree, for the runs the experiment variables can express (transformer arc
 (pool model, GQA, Qwen2.5-VL frames, other recipes) are listed as skipped. Imported runs are marked meta.legacy: their
 steps.jsonl rows are 50-step means of the training loss (no rigid_loss / avg_dist), and they lack the kNN metric.
 
-  python scripts/import_legacy.py fetch      # rnn:runs/* and every Baseten job's runs/* (json/jsonl) -> legacy_runs/
-  python scripts/import_legacy.py convert    # legacy_runs/* -> results/
-  python scripts/import_legacy.py ckpt OLD_RUN_DIR/best.pt   # an old checkpoint -> results/<run folder>/best.pt
+  python runners/slurm/import_legacy.py fetch      # rnn:runs/* and every Baseten job's runs/* (json/jsonl) -> legacy_runs/
+  python runners/slurm/import_legacy.py convert    # legacy_runs/* -> results/
+  python runners/slurm/import_legacy.py ckpt OLD_RUN_DIR/best.pt   # an old checkpoint -> results/<run folder>/best.pt
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import chz
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from wfemb.config import DataConfig, EvalConfig, Experiment, TrainConfig, default_results  # noqa: E402
 from wfemb.storage.fetch import baseten_jobs  # noqa: E402

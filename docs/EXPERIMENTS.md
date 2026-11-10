@@ -1,6 +1,7 @@
 # Experiments: variables, run ids, metrics, results layout
 
-This is the contract between the training code (`wfemb/`), the launchers (`jobs/`, `baseten/`, `scripts/`), the local
+This is the contract between the training code (`wfemb/`), the run queue (`jobs.txt`), the launchers (`runners/`), the
+local
 results tree (`results/`) and the dashboard (`dashboard/`). Definitions live in code in `wfemb/config.py`
 (variables, ids) and `wfemb/metrics.py` (metrics).
 
@@ -74,6 +75,12 @@ Every run writes raw data only (no summaries; the dashboard computes those) to
 `time` is seconds since the run started. A run without `final.json` is still running (or died). The results root is
 `$WFEMB_RESULTS`, default `<repo>/results` (gitignored). Runs on rnn write to `$WFEMB_DATA/results`, runs on Baseten to
 the job's checkpoint directory; `python -m wfemb.storage.fetch rnn|baseten` copies them into the local `results/`.
+
+## Run queue
+
+`jobs.txt` (repo root) lists every run by id, in named sections; one section is one launch (a Baseten job, or one
+rnn submission packed onto GPUs). Format: `[section]` lines, then one `<run id> [overrides]` per line, `#` comments.
+`python -m wfemb.storage.jobs list` shows each run's status; the dashboard's Queue view shows the same.
 
 ## Metrics (wfemb/metrics.py)
 

@@ -1,19 +1,20 @@
 #!/bin/bash
-# Run a job file's runs on one Baseten job, all at once, spread round-robin over the job's GPUs.
-# Usage: bash baseten/train.sh jobs/<name>.txt   (one run per line: a run id, optionally followed by overrides)
-# Inputs come from the team cache (baseten/download.sh, baseten/build.sh). Each run writes its results folder under
+# Run one section of jobs.txt on one Baseten job: all its runs at once, spread round-robin over the job's GPUs.
+# Usage: bash runners/baseten/train.sh <section>
+# Inputs come from the team cache (runners/baseten/download.sh, runners/baseten/build.sh). Each run writes its results folder under
 # $WFEMB_RESULTS; at the end the results tree goes to the job's checkpoint directory (locally:
 # python -m wfemb.storage.fetch baseten) and to the team cache.
 set -euo pipefail
 cd "$BT_WORKING_DIR"
-source baseten/setup.sh
-JOBFILE=$1
+source runners/baseten/setup.sh
+SECTION=$1
 export WFEMB_DATA=$BT_SCRATCH_DIR/data WFEMB_BULK=$BT_SCRATCH_DIR/bulk WFEMB_RESULTS=$BT_SCRATCH_DIR/results
-export WFEMB_LAUNCHER="baseten:${BT_TRAINING_JOB_ID:-$(basename "$JOBFILE" .txt)}"
+export WFEMB_LAUNCHER="baseten:${BT_TRAINING_JOB_ID:-$SECTION}"
 mkdir -p "$WFEMB_DATA/logs" "$WFEMB_BULK" "$WFEMB_RESULTS"
 t0=$(date +%s)
 cp -r "$TEAM"/data/{prepared,keys,keys_openai} "$WFEMB_DATA/"
-mapfile -t RUNS < <(sed 's/\s*#.*$//' "$JOBFILE" | grep -v '^\s*$')
+mapfile -t RUNS < <(python -m wfemb.storage.jobs runs "$SECTION")
+(( ${#RUNS[@]} )) || { echo "no runs in section [$SECTION]"; exit 1; }
 for n in $(for l in "${RUNS[@]}"; do python -m wfemb.config "id=${l%% *}" | sed -n 's#^frames: *.*/##p'; done | sort -u); do
     mkdir -p "$WFEMB_BULK/$n"                                  # the frame caches the runs need, to local NVMe
     for f in "$TEAM/bulk/$n"/*; do cp "$f" "$WFEMB_BULK/$n/" & done; wait

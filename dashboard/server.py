@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local dashboard for the results tree (docs/EXPERIMENTS.md): runs table, curves, final metrics, queue, demo bundles.
 
-    python dashboard/server.py [--results results] [--bundles dashboard/bundles] [--jobs jobs] [--port 8765]
+    python dashboard/server.py [--results results] [--bundles dashboard/bundles] [--jobs jobs.txt] [--port 8765]
 
 Standard library only. Serves the static frontend in dashboard/static/ and a small JSON API:
 
@@ -9,7 +9,7 @@ Standard library only. Serves the static frontend in dashboard/static/ and a sma
     GET /api/run?id=<run id>           one run: summary + raw config.json and final.json
     GET /api/series?id=<run id>        steps.jsonl and evals.jsonl as columns, downsampled to ~max_points rows
         [&max_points=2000] [&minmax=1] [&which=steps,evals] [&cols=loss,lr]
-    GET /api/queue                     jobs/*.txt with each id's status in the results tree
+    GET /api/queue                     the sections of jobs.txt with each id's status in the results tree
     GET /bundles/<run id>/<path>       files of a demo bundle (wfemb.demo export --out dashboard/bundles/<run id>)
 
 Parsed files are cached by (path, mtime, size); a growing steps.jsonl is parsed incrementally (only the new bytes).
@@ -528,62 +528,65 @@ class Results:
 
     # ------------------------------------------------------------------ queue
     def queue(self) -> dict:
+        """jobs.txt: one group per [section] (comments before its first run = its header), each run with its status."""
         now = time.time()
         index = self.scan()
         bset = set(self.bundle_ids())
         status = {}
-        files = []
-        paths = sorted(self.jobs.rglob("*.txt")) if self.jobs.is_dir() else []
+        sections = []
         ref = dict(parse_id(self.reference_id))
         seen_ids = set()
-        for p in paths:
-            entries, header, started = [], [], False
-            try:
-                text = p.read_text(encoding="utf-8", errors="replace")
-            except OSError as e:
-                files.append({"name": str(p.relative_to(self.jobs)), "error": str(e), "entries": [], "header": []})
+        try:
+            text = self.jobs.read_text(encoding="utf-8", errors="replace") if self.jobs.is_file() else ""
+            mtime = self.jobs.stat().st_mtime if self.jobs.is_file() else None
+        except OSError as e:
+            return clean({"jobs_root": str(self.jobs), "reference_id": self.reference_id, "error": str(e),
+                          "files": [], "unqueued": sorted(index)})
+        cur = None
+        for ln, raw in enumerate(text.splitlines(), 1):
+            body, _, comment = raw.partition("#")
+            body, comment = body.strip(), comment.strip()
+            m = re.fullmatch(r"\[([A-Za-z0-9_.-]+)\]", body)
+            if m:
+                cur = {"name": m.group(1), "header": [], "entries": [], "mtime": mtime, "line": ln}
+                sections.append(cur)
                 continue
-            for ln, raw in enumerate(text.splitlines(), 1):
-                body, _, comment = raw.partition("#")
-                body, comment = body.strip(), comment.strip()
-                if not body:
-                    if not started and comment:
-                        header.append(comment)
-                    continue
-                started = True
-                toks = body.split()
-                rid, overrides = toks[0], toks[1:]
-                problems = []
-                segs = parse_id(rid)
-                if any(not v for _, v in segs):
-                    problems.append("segment without '-'")
-                elif [k for k, _ in segs] != [k for k in ref if k in dict(segs)] and ref:
-                    problems.append("variables out of order")
-                unknown = [k for k, _ in segs if k not in ref]
-                if unknown and ref:
-                    problems.append("unknown variable " + ", ".join(unknown))
-                bad_ov = [o for o in overrides if "=" not in o]
-                if bad_ov:
-                    problems.append("override without '=': " + " ".join(bad_ov))
-                if rid not in status:
-                    d = index.get(rid) or self.run_dir(rid)
-                    if d is None:
-                        status[rid] = None
-                    else:
-                        status[rid] = self.summary(rid, d, now, bset)
-                s = status[rid]
-                seen_ids.add(rid)
-                entries.append({
-                    "line": ln, "id": rid, "overrides": overrides, "comment": comment or None,
-                    "status": s["status"] if s else "not started", "problems": problems,
-                    "last_step": s["last_step"] if s else None, "total_steps": s["total_steps"] if s else None,
-                    "best_val_loss": s["best_val_loss"] if s else None,
-                    "final": {k: v for k, v in (s.get("final") or {}).items() if k.startswith("test_")} if s else None,
-                })
-            files.append({"name": str(p.relative_to(self.jobs)), "header": header, "entries": entries,
-                          "mtime": p.stat().st_mtime})
+            if not body:
+                if cur is not None and comment and not cur["entries"]:
+                    cur["header"].append(comment)
+                continue
+            if cur is None:                                   # a run before any [section]
+                cur = {"name": "(no section)", "header": [], "entries": [], "mtime": mtime, "line": ln}
+                sections.append(cur)
+            toks = body.split()
+            rid, overrides = toks[0], toks[1:]
+            problems = []
+            segs = parse_id(rid)
+            if any(not v for _, v in segs):
+                problems.append("segment without '-'")
+            elif [k for k, _ in segs] != [k for k in ref if k in dict(segs)] and ref:
+                problems.append("variables out of order")
+            unknown = [k for k, _ in segs if k not in ref]
+            if unknown and ref:
+                problems.append("unknown variable " + ", ".join(unknown))
+            bad_ov = [o for o in overrides if "=" not in o]
+            if bad_ov:
+                problems.append("override without '=': " + " ".join(bad_ov))
+            if rid not in status:
+                d = index.get(rid) or self.run_dir(rid)
+                status[rid] = None if d is None else self.summary(rid, d, now, bset)
+            st = status[rid]
+            seen_ids.add(rid)
+            cur["entries"].append({
+                "line": ln, "id": rid, "overrides": overrides, "comment": comment or None,
+                "status": st["status"] if st else "not started", "problems": problems,
+                "last_step": st["last_step"] if st else None, "total_steps": st["total_steps"] if st else None,
+                "best_val_loss": st["best_val_loss"] if st else None,
+                "final": {k: v for k, v in (st.get("final") or {}).items() if k.startswith("test_")} if st else None,
+            })
         unqueued = sorted(rid for rid in index if rid not in seen_ids)
-        return clean({"jobs_root": str(self.jobs), "reference_id": self.reference_id, "files": files,
+        # "files" = the sections (the frontend groups by it)
+        return clean({"jobs_root": str(self.jobs), "reference_id": self.reference_id, "files": sections,
                       "unqueued": unqueued})
 
 
@@ -716,7 +719,7 @@ def main(argv=None):
     ap.add_argument("--results", default=os.environ.get("WFEMB_RESULTS", str(REPO / "results")),
                     help="results root (default $WFEMB_RESULTS or <repo>/results)")
     ap.add_argument("--bundles", default=str(REPO / "dashboard" / "bundles"), help="demo bundles, one folder per run id")
-    ap.add_argument("--jobs", default=str(REPO / "jobs"), help="folder of queue files (*.txt)")
+    ap.add_argument("--jobs", default=str(REPO / "jobs.txt"), help="the run queue file")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--stale-minutes", type=float, default=15,
@@ -742,7 +745,7 @@ def main(argv=None):
     R = Handler.R
     print(f"results {R.root}{'' if R.root.is_dir() else ' (missing)'}\n"
           f"bundles {R.bundles}{'' if R.bundles.is_dir() else ' (missing)'}\n"
-          f"jobs    {R.jobs}{'' if R.jobs.is_dir() else ' (missing)'}\n"
+          f"jobs    {R.jobs}{'' if R.jobs.is_file() else ' (missing)'}\n"
           f"dashboard on http://{a.host}:{a.port}/", flush=True)
     try:
         srv.serve_forever()

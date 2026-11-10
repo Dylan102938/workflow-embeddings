@@ -5,7 +5,7 @@
   python -m wfemb.storage.fetch baseten --job q9gge93  # one job
   ... --ckpt                                           # also the checkpoints (best.pt, last.pt)
 
-Baseten jobs leave their results tree in the job's checkpoint directory (baseten/train.sh); `truss train
+Baseten jobs leave their results tree in the job's checkpoint directory (runners/baseten/train.sh); `truss train
 get_checkpoint_urls` lists those files with download URLs.
 """
 from __future__ import annotations

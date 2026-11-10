@@ -10,7 +10,7 @@
 #SBATCH --array=0-7
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%A_%a.out
 set -euo pipefail
-source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
+source /nas/ucb/dfeng/code/workflow-embeddings/runners/slurm/env.sh
 echo "host $(hostname)  git $(git rev-parse --short HEAD)  args: $*"
 $UV sync --frozen --inexact >/dev/null 2>&1 || true
 $UV run python -c "import sys, torch, transformers, importlib.util as u; print(sys.version.split()[0], torch.__version__, transformers.__version__, torch.cuda.get_device_name(0))"

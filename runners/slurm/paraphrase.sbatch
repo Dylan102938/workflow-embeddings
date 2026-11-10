@@ -10,7 +10,7 @@
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # vLLM pins its own torch, so it runs in a separate, isolated uv environment.
 set -euo pipefail
-source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
+source /nas/ucb/dfeng/code/workflow-embeddings/runners/slurm/env.sh
 export VLLM_CACHE_ROOT=/nas/ucb/dfeng/.cache/vllm
 PYTHONPATH=$REPO $UV run --isolated --no-project --python 3.11 --with "vllm==0.8.5" --with "transformers==4.51.3" \
     python -m wfemb.prep.paraphrase "$@"

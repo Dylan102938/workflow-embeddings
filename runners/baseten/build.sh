@@ -1,14 +1,14 @@
 #!/bin/bash
 # Build frozen-encoder frame caches on Baseten: AgentNet screenshots (public HF dataset) + our private derived data
 # (Dylan123/wfemb-data: prepared sessions/events, key sets, PCA bases fitted on rnn) -> dense caches in the team cache.
-# Usage: bash baseten/build.sh "SPEC [SPEC ...]"   SPEC = siglip2:<grid> (e.g. siglip2:24 -> patch 576)
+# Usage: bash runners/baseten/build.sh "SPEC [SPEC ...]"   SPEC = siglip2:<grid> (e.g. siglip2:24 -> patch 576)
 set -euo pipefail
 cd "$BT_WORKING_DIR"
-source baseten/setup.sh
+source runners/baseten/setup.sh
 SPECS=${1:-"siglip2:16 siglip2:24"}
 export WFEMB_DATA=$BT_SCRATCH_DIR/data WFEMB_BULK=$BT_SCRATCH_DIR/bulk
 mkdir -p "$WFEMB_DATA" "$WFEMB_BULK" "$TEAM/data" "$TEAM/bulk"
-t0=$(date +%s)                                  # inputs were downloaded to the team cache by baseten/download.sh
+t0=$(date +%s)                                  # inputs were downloaded to the team cache by runners/baseten/download.sh
 cp -r "$TEAM"/data/{prepared,keys,keys_openai} "$WFEMB_DATA/"
 cp "$TEAM"/data/bulk/*.npz "$WFEMB_BULK/"
 ln -sfn "$TEAM/raw/agentnet_raw" "$WFEMB_DATA/agentnet_raw"   # read in place: the job's local disk quota is ~300 GB

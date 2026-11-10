@@ -8,8 +8,8 @@
 #SBATCH --output=/nas/ucb/dfeng/data/workflow-embeddings/logs/%x-%j.out
 # OpenAI text-embedding-3-large keys (training/eval labels); typed-text input features stay Qwen3-0.6B.
 set -euo pipefail
-source /nas/ucb/dfeng/code/workflow-embeddings/scripts/env.sh
+source /nas/ucb/dfeng/code/workflow-embeddings/runners/slurm/env.sh
 set -a; source "$REPO/.env"; set +a      # OPENAI_API_KEY (gitignored)
-# Usage: sbatch scripts/openai_keys.sbatch [--out DIR] [openai_keys args...]   (DIR defaults to DATA/keys_openai)
+# Usage: sbatch runners/slurm/openai_keys.sbatch [--out DIR] [openai_keys args...]   (DIR defaults to DATA/keys_openai)
 OUT=$(echo "$@" | sed -n 's/.*--out \([^ ]*\).*/\1/p'); OUT=${OUT:-$WFEMB_DATA/keys_openai}
 $UV run python -m wfemb.prep.openai_keys "$@"

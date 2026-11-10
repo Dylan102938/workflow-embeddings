@@ -5,7 +5,7 @@ standard library only; plain HTML/CSS/JS, no build step, no CDN.
 
 ```
 python dashboard/server.py                       # http://127.0.0.1:8765/
-python dashboard/server.py --results results --jobs jobs --bundles dashboard/bundles --port 8765 --host 127.0.0.1
+python dashboard/server.py --results results --jobs jobs.txt --bundles dashboard/bundles --port 8765 --host 127.0.0.1
 ```
 
 Defaults are relative to the repo root (`--results` defaults to `$WFEMB_RESULTS`, else `results/`). A run without
@@ -22,7 +22,7 @@ Views (all state is in the URL hash, so a view can be bookmarked):
   validation curves (ring = the checkpoint `final.json` chose), crosshair readout, drag to zoom (all charts),
   final-metrics table with the best value per column highlighted. With *Merge seeds*: mean line, min–max band.
 - **Group by**: a final metric (or best val_loss) by one variable, optionally × a second one, mean ± std over runs.
-- **Queue**: every `jobs/*.txt` (lines: `<run id> [overrides]`, `#` comments) with each id's status, plus runs that
+- **Queue**: every `[section]` of `jobs.txt` (lines: `<run id> [overrides]`, `#` comments) with each id's status, plus runs that
   are in results but in no queue file.
 - **Demo**: Intent Replay (`static/demo.html?bundle=/bundles/<run id>/`) for the selected run's bundle in
   `dashboard/bundles/<run id>/`, or the commands that make one.

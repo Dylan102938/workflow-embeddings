@@ -1,7 +1,7 @@
-"""Write a fake results tree (docs/EXPERIMENTS.md layout) and a jobs/ queue folder, for testing the dashboard.
+"""Write a fake results tree (docs/EXPERIMENTS.md layout) and a jobs.txt run queue, for testing the dashboard.
 
     python tests/make_fake_results.py OUT_DIR [--steps 14000] [--seed 0]
-    python dashboard/server.py --results OUT_DIR/results --jobs OUT_DIR/jobs
+    python dashboard/server.py --results OUT_DIR/results --jobs OUT_DIR/jobs.txt
 
 13 runs: the default config with seeds 0-2, arch transf (2 seeds) and gru, d_model 384 (2 seeds), dropout 0.1,
 n_layers 6, beta 2 still running (no final.json, files touched now), a run that died (stale: no final.json, files two
@@ -137,7 +137,7 @@ def main():
             steps = [{k: v for k, v in r.items() if k not in ("rigid_loss", "avg_dist")} for r in steps if r["step"] % 50 == 0]
             evals = [{k: v for k, v in r.items() if "avg_log_dist" not in k} for r in evals]
         meta = {"git_commit": "abd7a6a", "git_dirty": False, "host": "rnn-a100-3" if exp["seed"] != 2 else "baseten",
-                "launcher": "jobs/fake.txt",
+                "launcher": "fake",
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now - 4 * 3600)),
                 "n_params": 21_345_792 if exp["dm"] == 512 else 12_402_304, "steps_per_epoch": spe, "total_steps": total}
         if legacy:
@@ -173,13 +173,12 @@ def main():
                 os.utime(p, (old, old))
 
     # a queue: done, running, stale and never-started ids, overrides, comments, one malformed line
-    jobs = out / "jobs"
-    jobs.mkdir(parents=True, exist_ok=True)
+    jobs = out / "jobs.txt"
     default = {k: v for k, v in VARS}
     todo = [run_id(default | {"arch": "gru", "seed": 1}), run_id(default | {"nl": 8}), run_id(default | {"bs": 128}),
             run_id(default | {"dh": 128, "nh": 4})]
-    (jobs / "r26.txt").write_text(
-        "# Round 26 (fake): architecture and depth.\n"
+    jobs.write_text(
+        "# Run queue (fake).\n\n[r26]\n# Round 26 (fake): architecture and depth.\n"
         "# Same recipe as the best model; 24x24 SigLIP2 frames.\n\n"
         + "\n".join(ids[:6]) + "\n"
         + ids[9] + "   # depth 6\n"
@@ -187,13 +186,11 @@ def main():
         + todo[0] + "\n"
         + "\n# hard negatives\n"
         + ids[10] + " train.max_frames=2048 train.eval_steps=500\n"
-    )
-    (jobs / "r27.txt").write_text(
-        "# Round 27 (fake): width, depth, masking ablations.\n"
+        + "\n[r27]\n# Round 27 (fake): width and depth ablations.\n"
         + "\n".join([ids[6], ids[7], ids[8], ids[11], todo[1], todo[2]]) + "\n"
         + "arch-gru_dm-512_foo-1_seed-0   # malformed: unknown variable\n"
     )
-    print(f"wrote {len(ids)} runs to {root} and 2 queue files to {jobs}")
+    print(f"wrote {len(ids)} runs to {root} and a 2-section queue to {jobs}")
     for rid in ids:
         print("  " + rid)
 

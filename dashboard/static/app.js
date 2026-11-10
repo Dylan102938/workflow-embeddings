@@ -845,11 +845,11 @@ async function renderQueue() {
   for (const f of Q.files) for (const e of f.entries) uniq.set(e.id, e.status);
   const counts = Object.fromEntries(Q_STATUSES.map((s) => [s, [...uniq.values()].filter((x) => x === s).length]));
   $("#qstfilter").innerHTML = Q_STATUSES.map((s) => `<button data-qst="${s}" aria-pressed="${S.qst.has(s)}">${pill(s)}<span class="n">${counts[s]}</span></button>`).join("");
-  $("#queue-summary").textContent = `${uniq.size} distinct ids in ${Q.files.length} file${Q.files.length === 1 ? "" : "s"} under ${Q.jobs_root}`;
+  $("#queue-summary").textContent = `${uniq.size} distinct ids in ${Q.files.length} section${Q.files.length === 1 ? "" : "s"} of ${Q.jobs_root}`;
   const terms = S.qq.toLowerCase().split(/\s+/).filter(Boolean);
   const keep = (e) => S.qst.has(e.status) && terms.every((t) => (t.startsWith("!") ? !e.id.toLowerCase().includes(t.slice(1)) : e.id.toLowerCase().includes(t)));
   let h = "";
-  if (!Q.files.length) h += `<p class="empty">No queue files (*.txt) in ${esc(Q.jobs_root)}.</p>`;
+  if (!Q.files.length) h += `<p class="empty">No [sections] in ${esc(Q.jobs_root)}.</p>`;
   for (const f of Q.files) {
     const ents = f.entries.filter(keep);
     const fc = Q_STATUSES.map((s) => [s, f.entries.filter((e) => e.status === s).length]).filter(([, c]) => c);

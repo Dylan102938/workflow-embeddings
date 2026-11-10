@@ -75,11 +75,30 @@ def baseten_job_files(job_id: str) -> list[dict]:
         return json.loads(written[0].read_text()).get("checkpoint_artifacts", [])
 
 
-def download(url: str, destination: Path):
+def download(url: str, destination: Path, expected_size: int | None = None, max_attempts: int = 10):
+    """Downloads to destination. With expected_size, a connection that closes early is resumed where it stopped."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url, timeout=300) as response, open(destination, "wb") as file:
-        while chunk := response.read(1 << 20):
-            file.write(chunk)
+    if expected_size is None:
+        with urllib.request.urlopen(url, timeout=300) as response, open(destination, "wb") as file:
+            while chunk := response.read(1 << 20):
+                file.write(chunk)
+        return
+    destination.unlink(missing_ok=True)
+    for _ in range(max_attempts):
+        done = destination.stat().st_size if destination.exists() else 0
+        if done >= expected_size:
+            break
+        request = urllib.request.Request(url, headers={"Range": f"bytes={done}-"} if done else {})
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response, open(destination, "ab") as file:
+                while chunk := response.read(1 << 20):
+                    file.write(chunk)
+        except OSError as error:
+            print(f"{destination.name}: {error}; resuming at byte {destination.stat().st_size}", flush=True)
+    if destination.stat().st_size != expected_size:
+        raise OSError(
+            f"{destination}: {destination.stat().st_size} of {expected_size} bytes after {max_attempts} attempts"
+        )
 
 
 def fetch_baseten(
@@ -107,7 +126,7 @@ def fetch_baseten(
                 continue
             if destination.exists() and destination.stat().st_size == file.get("size_bytes"):
                 continue
-            download(file["url"], destination)
+            download(file["url"], destination, file.get("size_bytes"))
             n_downloaded += 1
         print(f"{job_id}: {n_downloaded} file(s) downloaded")
 

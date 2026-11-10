@@ -134,8 +134,7 @@ There are two builders:
 - `openai_keys.py` embeds instructions and paraphrases with the OpenAI API into `--out` (default
   `DATA/keys_openai`). These keys are training and evaluation **labels** only. Typed-text vectors are model
   **inputs**, so `text_vecs.npy` there is a symlink to the default set's file. `raw_instr.*` and `raw_para.*` cache
-  the embeddings of the unique strings, so changing the drift filter costs no API calls. At the end it prints how
-  well each key space alone ranks the judged pairs (skipped for splits without a judged file).
+  the embeddings of the unique strings, so changing the drift filter costs no API calls.
 
 **Paraphrases** (`paraphrase.py`). A local instruction-tuned LLM (vLLM) rewrites every unique instruction `--n`
 times: same task, different wording, with app names and concrete values kept. Rewrites equal to the instruction are
@@ -154,7 +153,8 @@ unfiltered and is shared by all key sets.
 
 ## 5. `judge_pool.py`: judged relevance pools
 
-The pools are the ground truth for session-to-session retrieval (`judged_r@k`, `judged_ndcg@10`).
+The pools pick the judged same-workflow partners shown by the demo (`wfemb/demo/selection.py`). They are not a
+training metric: the val pool has only 60 same-workflow queries, and unjudged pairs would count as irrelevant.
 
 1. **Pool.** For every session of the split, candidates from the same split are proposed by four retrievers:
    `key` (nearest sessions by default instruction key, `--k_key` 4), `action` (nearest by TF-IDF over the

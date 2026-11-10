@@ -5,11 +5,6 @@ Shapes: B sessions, T steps, N candidate keys, D label dimension. Distances are 
 
 from __future__ import annotations
 
-import collections
-import json
-from pathlib import Path
-
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -131,63 +126,3 @@ def avg_log_dist_knn(
         log_distances = torch.log((1.0 - similarities).clamp(min=1e-6))
         results.append((log_distances * is_other).sum(1) / is_other.sum(1).clamp(min=1))
     return torch.cat(results)
-
-
-# ----------------------------------------------------------------------------------------------- judged retrieval
-SAME_WORKFLOW = 2  # relevance grades: 2 = same workflow, 1 = related, 0 = different
-
-
-def load_judged(path: Path, session_indices: np.ndarray, groups: np.ndarray) -> dict | None:
-    """Graded relevance {query position: {other position: grade}} among the given sessions.
-
-    Combines the LLM-judged pairs in `path` with duplicate-instruction groups (grade 2). None without the file.
-    """
-    if not Path(path).exists():
-        return None
-    position = {int(session): index for index, session in enumerate(session_indices)}
-    relevance = collections.defaultdict(dict)
-    for line in open(path):
-        pair = json.loads(line)
-        first, second = position.get(pair["a"]), position.get(pair["b"])
-        if first is None or second is None:
-            continue
-        grade = int(pair["label"])
-        relevance[first][second] = max(relevance[first].get(second, 0), grade)
-        relevance[second][first] = max(relevance[second].get(first, 0), grade)
-    members = collections.defaultdict(list)
-    for index, group in enumerate(np.asarray(groups).tolist()):
-        members[group].append(index)
-    for group_members in members.values():
-        for first in group_members:
-            for second in group_members:
-                if first != second:
-                    relevance[first][second] = SAME_WORKFLOW
-    return relevance
-
-
-def judged_retrieval(embeddings: torch.Tensor, relevance: dict, k: int = 10) -> dict:
-    """Session-to-session retrieval scored with pooled judged relevance (unjudged pairs count as 0)."""
-    embeddings = F.normalize(embeddings.float(), dim=-1)
-    similarities = embeddings @ embeddings.T
-    similarities.fill_diagonal_(-float("inf"))
-    discounts = 1.0 / np.log2(np.arange(2, k + 2))
-    hits_at_1, hits_at_5, ndcgs = [], [], []
-    for query, grades in relevance.items():
-        if not any(grade > 0 for grade in grades.values()):
-            continue
-        ranking = similarities[query].argsort(descending=True).tolist()
-        gains = np.array([grades.get(candidate, 0) for candidate in ranking[:k]], float)
-        ideal = np.sort(np.array(list(grades.values()), float))[::-1][:k]
-        dcg = ((2**gains - 1) * discounts[: len(gains)]).sum()
-        ndcgs.append(dcg / ((2**ideal - 1) * discounts[: len(ideal)]).sum())
-        if SAME_WORKFLOW in grades.values():
-            rank = (
-                next(index for index, candidate in enumerate(ranking) if grades.get(candidate, 0) == SAME_WORKFLOW) + 1
-            )
-            hits_at_1.append(rank <= 1)
-            hits_at_5.append(rank <= 5)
-
-    def mean(values):
-        return float(np.mean(values)) if values else float("nan")
-
-    return {"judged_r@1": mean(hits_at_1), "judged_r@5": mean(hits_at_5), f"judged_ndcg@{k}": mean(ndcgs)}

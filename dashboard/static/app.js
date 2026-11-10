@@ -33,9 +33,6 @@ const VAL_DEFS = [
   { k: "val_r@1", sub: "" },
   { k: "val_r@5", sub: "" },
   { k: "val_avg_log_dist_100NN", match: /^val_avg_log_dist_\d+NN$/, sub: "mean log distance to the nearest candidates" },
-  { k: "val_judged_r@1", sub: "" },
-  { k: "val_judged_r@5", sub: "" },
-  { k: "val_judged_ndcg@10", sub: "" },
 ];
 const STEP_BOOKKEEPING = new Set(["step", "epoch", "time", "data_s", "step_s"]);
 const EVAL_BOOKKEEPING = new Set(["step", "epoch", "time", "max_mem_gb"]);
@@ -116,7 +113,7 @@ function direction(m) {
   if (/r@\d+$|ndcg@\d+$/.test(m)) return "max";
   return null;
 }
-const BASE_ORDER = [/^loss$/, /^r@1$/, /^r@5$/, /^r@\d+$/, /^avg_log_dist_\d+NN$/, /^judged_r@1$/, /^judged_r@5$/, /^judged_/];
+const BASE_ORDER = [/^loss$/, /^r@1$/, /^r@5$/, /^r@\d+$/, /^avg_log_dist_\d+NN$/];
 function metricRank(base) { const i = BASE_ORDER.findIndex((r) => r.test(base)); return i < 0 ? 99 : i; }
 function sortMetrics(keys) {
   return [...keys].sort((a, b) => {
@@ -328,7 +325,6 @@ const RUN_METRICS = () => [
   { key: "test_r@1", label: "r@1", group: "test" },
   { key: "test_r@5", label: "r@5", group: "test" },
   { key: knnKey("test"), label: knnKey("test").replace("test_avg_log_dist_", "avg_log_<wbr>dist_"), group: "test" },
-  { key: "test_judged_r@5", label: "judged_<wbr>r@5", group: "test" },
 ];
 // the segments of an id that differ from the best model (the reference id), in id format
 function diffPairs(vars) {

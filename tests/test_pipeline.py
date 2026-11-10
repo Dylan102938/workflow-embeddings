@@ -87,10 +87,8 @@ def test_training_writes_the_results_files(data_config, tmp_path, architecture, 
     assert steps[-1]["beta"] == pytest.approx(beta)
     evals = [json.loads(line) for line in (run_dir / "evals.jsonl").read_text().splitlines()]
     assert [row["step"] for row in evals] == [10, 20, 24]
-    assert {"val_loss", "val_r@1", "val_r@5", "val_avg_log_dist_20NN", "val_judged_r@5"} <= set(evals[0])
-    assert {"best_step", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_20NN", "test_judged_ndcg@10"} <= set(
-        final
-    )
+    assert {"val_loss", "val_r@1", "val_r@5", "val_avg_log_dist_20NN"} <= set(evals[0])
+    assert {"best_step", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_20NN"} <= set(final)
     saved = json.loads((run_dir / "config.json").read_text())
     assert saved["id"] == experiment.id and Experiment(**saved["experiment"]) == experiment
 

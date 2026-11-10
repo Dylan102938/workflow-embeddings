@@ -76,7 +76,6 @@ class WorkflowDataset:
         self.splits = np.array([session["split"] for session in self.sessions])
         group_ids = {name: index for index, name in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.groups = np.array([group_ids[session["group"]] for session in self.sessions])
-        self.judged_dir = root / "keys"
 
         cache_dir = config.frame_cache_dir(experiment)
         self.frames = FrameStore(cache_dir)

@@ -117,9 +117,6 @@ def curves(rng: random.Random, total: int, offset: float, beta: float, lr_peak: 
                     "val_r@1": 0.62 * q**2 + rng.gauss(0, 0.006),
                     "val_r@5": 0.86 * q**1.3 + rng.gauss(0, 0.006),
                     "val_avg_log_dist_100NN": -0.55 - 0.5 * q + rng.gauss(0, 0.004),
-                    "val_judged_r@1": 0.41 * q**1.5 + rng.gauss(0, 0.006),
-                    "val_judged_r@5": 0.70 * q**1.2 + rng.gauss(0, 0.006),
-                    "val_judged_ndcg@10": 0.55 * q + rng.gauss(0, 0.006),
                     "max_mem_gb": round(31.5 + rng.random(), 2),
                 }
             )

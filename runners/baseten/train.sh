@@ -48,7 +48,7 @@ from pathlib import Path
 from wfemb.config import Experiment, default_results_root
 experiment = Experiment.from_id(sys.argv[1])
 final_path = Path(default_results_root()) / experiment.relative_dir / "final.json"
-shown = ("best_step", "val_loss", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_100NN", "test_judged_r@5")
+shown = ("best_step", "val_loss", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_100NN")
 if final_path.exists():
     result = {name: value for name, value in json.loads(final_path.read_text()).items() if name in shown}
 else:

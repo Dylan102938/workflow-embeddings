@@ -19,7 +19,7 @@ from .data import TrainingCandidates, WorkflowDataset, eval_batches
 from .storage.results import to_json
 
 SCORING_CHUNK = 64  # sessions scored at once: logits are [chunk, T, N]
-METRIC_ORDER = ("loss", "r@1", "r@5", "avg_log_dist", "judged_r@1", "judged_r@5", "judged_ndcg")
+METRIC_ORDER = ("loss", "r@1", "r@5", "avg_log_dist")
 
 
 @torch.no_grad()
@@ -106,11 +106,6 @@ def evaluate(
         "r@5": metrics.recall_at_k(ranks, 5),
         f"avg_log_dist_{config.n_neighbors}NN": float(log_distances.mean()),
     }
-    relevance = metrics.load_judged(
-        dataset.judged_dir / f"judged_{split}.jsonl", session_indices, dataset.groups[session_indices]
-    )
-    if relevance is not None:
-        results.update(metrics.judged_retrieval(embeddings, relevance))
     return {f"{split}_{name}": value for name, value in results.items()}
 
 

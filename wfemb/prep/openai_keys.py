@@ -65,8 +65,6 @@ def main() -> None:
         json.dump(meta, f, indent=1)
     print(json.dumps(meta, indent=1), flush=True)
 
-    report_text_key_oracle(sessions, [("qwen3-0.6B", np.load(paths.SHARED / "keys.npy")), (args.model, keys)])
-
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -133,28 +131,6 @@ def link_typed_text_vectors(output_dir: Path) -> None:
     if link.is_symlink() or link.exists():
         link.unlink()
     link.symlink_to(paths.SHARED / "text_vecs.npy")
-
-
-def report_text_key_oracle(sessions: list[dict], key_sets: list[tuple[str, np.ndarray]]) -> None:
-    """Prints how well each key space alone ranks the judged same-workflow pairs of val and test."""
-    import torch
-
-    from ..metrics import judged_retrieval, load_judged
-
-    group_ids = {group: i for i, group in enumerate(sorted({session["group"] for session in sessions}))}
-    groups = np.array([group_ids[session["group"]] for session in sessions])
-    splits = np.array([session["split"] for session in sessions])
-    for name, keys in key_sets:
-        for split in ("val", "test"):
-            session_indices = np.nonzero(splits == split)[0]
-            relevance = load_judged(paths.SHARED / f"judged_{split}.jsonl", session_indices, groups[session_indices])
-            if relevance is not None:
-                metrics = judged_retrieval(torch.from_numpy(keys[session_indices].astype(np.float32)), relevance)
-                print(
-                    f"text-key oracle  {name:24s} {split}:",
-                    {metric: round(value, 4) for metric, value in metrics.items()},
-                    flush=True,
-                )
 
 
 if __name__ == "__main__":

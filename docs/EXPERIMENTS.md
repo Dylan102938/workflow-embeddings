@@ -84,7 +84,7 @@ Every run writes raw data only (no summaries; the dashboard computes those) to
 |---|---|---|
 | `config.json` | json | `{"id", "experiment": {...}, "train": {...}, "eval": {...}, "data": {...}, "model": {...}, "meta": {...}}` (meta: git commit, host, launcher, start time, n_params, steps_per_epoch, total_steps; `legacy` / `legacy_name` for imported pre-refactor runs) |
 | `steps.jsonl` | jsonl, one row per training step | `step, epoch, time, loss, rigid_loss, avg_dist, lr, grad_norm, beta, data_s, step_s` |
-| `evals.jsonl` | jsonl, one row every `eval_steps` (and at the last step) | `step, epoch, time, val_loss, val_r@1, val_r@5, val_avg_log_dist_100NN, val_judged_r@1, val_judged_r@5, val_judged_ndcg@10, max_mem_gb` |
+| `evals.jsonl` | jsonl, one row every `eval_steps` (and at the last step) | `step, epoch, time, val_loss, val_r@1, val_r@5, val_avg_log_dist_100NN, max_mem_gb` |
 | `final.json` | json, written once at the end | `best_step, selected_on` and every `val_*` / `test_*` metric at the chosen checkpoint, `train_minutes` |
 | `test_embeddings.npz` | npz, written once at the end | every test step's direction (float16) and confidence at the chosen checkpoint: `session_indices`, `step_offsets`, `lengths` (one entry per session) and `directions`, `confidences` (one row per step; session i owns rows `step_offsets[i]` to `step_offsets[i] + lengths[i] - 1`). The demo is built from it. About 360 MB; fetched with `--embeddings` |
 | `best.pt`, `last.pt` | checkpoints | EMA weights and the model configuration; fetched with `--checkpoints` |
@@ -123,5 +123,3 @@ evaluated split's keys (val/test instructions never occur in training).
   among the candidates at the session's last step.
 - `val_avg_log_dist_100NN` (and `test_*`): for each session, the 100 candidates nearest its workflow embedding, minus
   its own label if it is among them; the mean log distance to them; averaged over sessions.
-- `val_judged_r@1`, `val_judged_r@5`, `val_judged_ndcg@10` (and `test_*`): session-to-session retrieval of the
-  workflow embeddings across apps, with pooled LLM-judged relevance (`keys/judged_<split>.jsonl`).

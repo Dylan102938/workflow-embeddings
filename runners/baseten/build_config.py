@@ -1,6 +1,7 @@
 """Baseten job: build frame caches (see runners/baseten/build.sh). Push from the repo root:
-truss train push runners/baseten/build_config.py --job-name build"""
+WFEMB_SPECS="siglip2:32 siglip2:16:0" WFEMB_GPUS=2 truss train push runners/baseten/build_config.py --job-name build"""
 
+import os
 from pathlib import Path
 
 from truss.base.truss_config import AcceleratorSpec
@@ -11,9 +12,9 @@ project = TrainingProject(
     name="wfemb",
     job=TrainingJob(
         image=Image(base_image="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"),
-        compute=Compute(accelerator=AcceleratorSpec(accelerator="H100", count=4)),  # platform picks CPU / memory
+        compute=Compute(accelerator=AcceleratorSpec(accelerator="H100", count=int(os.environ.get("WFEMB_GPUS", "4")))),
         runtime=Runtime(
-            start_commands=['bash runners/baseten/build.sh "siglip2:16 siglip2:24"'],
+            start_commands=[f'bash runners/baseten/build.sh "{os.environ["WFEMB_SPECS"]}"'],
             environment_variables={"HF_TOKEN": SecretReference(name="hf_access_token")},
             cache_config=CacheConfig(enabled=True),
         ),

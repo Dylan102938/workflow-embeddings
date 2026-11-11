@@ -30,6 +30,7 @@ ID_KEYS = {
     "bs": "batch_size",
     "ep": "n_epochs",
     "beta": "hard_negative_beta",
+    "pca": "pca_dim",
     "seed": "seed",
 }
 
@@ -50,6 +51,7 @@ class Experiment:
     batch_size: int = 64
     n_epochs: int = 45
     hard_negative_beta: float = 0.0
+    pca_dim: int = 512  # channels the screen features are PCA-projected to; 0 = unprojected
     seed: int = 0
 
     @chz.validate
@@ -60,6 +62,8 @@ class Experiment:
             raise ValueError(f"architecture {self.architecture} needs n_layers >= 2")
         if math.isqrt(self.n_patches) ** 2 != self.n_patches:
             raise ValueError(f"n_patches must be a square number (256, 576, ...), got {self.n_patches}")
+        if self.pca_dim < 0:
+            raise ValueError(f"pca_dim must be 0 (unprojected) or a channel count, got {self.pca_dim}")
 
     @property
     def id(self) -> str:
@@ -89,8 +93,13 @@ class Experiment:
 
     @property
     def frame_cache_name(self) -> str:
-        size = self.patch_grid_size
-        return "frames_dense" if size == 16 else f"frames_dense_g{size}"
+        return frame_cache_name(self.patch_grid_size, self.pca_dim)
+
+
+def frame_cache_name(grid_size: int, pca_dim: int) -> str:
+    grid = "" if grid_size == 16 else f"_g{grid_size}"
+    projection = {512: "", 0: "_raw"}.get(pca_dim, f"_pca{pca_dim}")
+    return f"frames_dense{grid}{projection}"
 
 
 def format_id_value(value) -> str:

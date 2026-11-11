@@ -8,28 +8,45 @@
 
 [bt3]
 # 2026-11-09, Baseten H100:2 (pre-refactor code; imported). SigLIP2 24x24 frames (patch 576) at d384 / d512.
-arch-late-history-transf_dm-384_dh-64_nl-4_nh-6_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0   # best model so far
+arch-late-history-transf_dm-384_dh-64_nl-4_nh-6_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0   # best model so far
 
 [bt5]
 # 2026-11-09, Baseten H100:2, 2 runs per GPU (pre-refactor code; imported when done). Hard negatives on the best
 # setup and a seed-1 control. (A 4th run, beta 2 without the near-duplicate mask, is not expressible: that
 # variable was removed.)
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-2_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-4_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-1   # seed control
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-2_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-4_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-1   # seed control
 
 [bt6]
-# Planned (first job on the refactored code). The best model with seed 2 on the new code (checks the refactor
-# against seeds 0 and 1 of the old code; also gives the new per-step metrics), width 768, depth 6, dropout 0.1.
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-2   # refactor check: seed 2 of the best model
-arch-late-history-transf_dm-768_dh-64_nl-4_nh-12_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-6_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.1_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
+# 2026-11-11, Baseten H100. Scale-up of the best model, one axis at a time: depth 4 -> 6.
+arch-late-history-transf_dm-512_dh-64_nl-6_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
 
 [bt7]
-# Planned. Head width / count at fixed d_model, higher learning rate, larger batch.
-arch-late-history-transf_dm-512_dh-128_nl-4_nh-4_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
-arch-late-history-transf_dm-512_dh-32_nl-4_nh-16_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-1e-3_bs-64_ep-45_beta-0_seed-0
-arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-128_ep-45_beta-0_seed-0
+# 2026-11-11, Baseten H100. Scale-up: width 512 -> 768.
+arch-late-history-transf_dm-768_dh-64_nl-4_nh-12_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+
+[rnn1]
+# 2026-11-11, rnn A100s (RUNS_PER_JOB=1; all A100s were taken, so these wait for free GPUs). The larger scale-ups:
+# depth 8, width 1024, width 768 with depth 6; and seed 2 of the best model on the refactored code (seeds 0 and 1
+# ran on the old code).
+arch-late-history-transf_dm-512_dh-64_nl-8_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-1024_dh-64_nl-4_nh-16_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-768_dh-64_nl-6_nh-12_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-2   # reference
+
+[bt8]
+# 2026-11-11, Baseten H100:2, after the caches frames_dense_g32 and frames_dense_raw are built. More screen tokens
+# (32x32 grid) on the best model; no PCA at patch 256 (compare with ..._patch-256_..._pca-512_seed-0, same model
+# otherwise: the 16x16 cache without PCA is 225 GB, the 24x24 one would be 506 GB).
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-1024_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-256_lr-5e-4_bs-64_ep-45_beta-0_pca-0_seed-0
+
+[later]
+# Planned, not launched. Dropout 0.1; head width / count at fixed d_model; higher learning rate; larger batch.
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.1_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-128_nl-4_nh-4_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-32_nl-4_nh-16_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-1e-3_bs-64_ep-45_beta-0_pca-512_seed-0
+arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-128_ep-45_beta-0_pca-512_seed-0

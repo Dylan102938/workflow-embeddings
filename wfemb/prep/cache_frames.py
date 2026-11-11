@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from ..config import frame_cache_name
 from ..storage import paths
 from .prepare import load_sessions
 from .splitzip import SplitZip
@@ -43,7 +44,7 @@ class Frame(NamedTuple):
 
 def main() -> None:
     args = parse_arguments()
-    output_dir = cache_dir(args.grid)
+    output_dir = paths.BULK / frame_cache_name(args.grid, args.pca_dim)
     output_dir.mkdir(parents=True, exist_ok=True)
     frames = all_frames(load_sessions())
     encoder = ScreenEncoder(args)
@@ -68,15 +69,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--grid", type=int, default=DEFAULT_GRID, help="tokens per frame = grid^2 (the experiment's patch)"
     )
-    parser.add_argument("--pca_dim", type=int, default=512)
+    parser.add_argument("--pca_dim", type=int, default=512, help="0: keep the encoder's channels (no PCA)")
     parser.add_argument("--pca_frames", type=int, default=16000)
     parser.add_argument("--batch", dest="batch_size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=10)
     return parser.parse_args()
-
-
-def cache_dir(grid: int) -> Path:
-    return paths.BULK / ("frames_dense" + (f"_g{grid}" if grid != DEFAULT_GRID else ""))
 
 
 def pca_path(grid: int, pca_dim: int) -> Path:
@@ -250,9 +247,12 @@ def sample_training_frames(frames: list[Frame], sample_size: int) -> list[Frame]
 # ---------------------------------------------------------------------------------------------- cache shards
 def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Namespace, output_dir: Path) -> None:
     """Writes global_<tag>.npy for this shard's steps, then meta_<tag>.json; an interrupted shard resumes."""
-    pca_file = pca_path(args.grid, args.pca_dim)
-    pca = np.load(pca_file)
-    mean, components = torch.from_numpy(pca["mean"]).cuda(), torch.from_numpy(pca["comps"]).cuda()
+    project = args.pca_dim > 0
+    pca_file = pca_path(args.grid, args.pca_dim) if project else None
+    dim = args.pca_dim if project else encoder.hidden_size
+    if project:
+        pca = np.load(pca_file)
+        mean, components = torch.from_numpy(pca["mean"]).cuda(), torch.from_numpy(pca["comps"]).cuda()
     bounds = np.linspace(0, len(frames), args.num_shards + 1).astype(int)
     first_step, end_step = int(bounds[args.shard]), int(bounds[args.shard + 1])
     tag = f"{args.shard:02d}of{args.num_shards:02d}"
@@ -266,7 +266,7 @@ def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Name
         print(f"resuming at {start_step}", flush=True)
     else:
         features = np.lib.format.open_memmap(
-            features_path, mode="w+", dtype=np.uint16, shape=(end_step - first_step, tokens_per_frame, args.pca_dim)
+            features_path, mode="w+", dtype=np.uint16, shape=(end_step - first_step, tokens_per_frame, dim)
         )
     print(f"dense shard {tag}: frames [{first_step}, {end_step}) of {len(frames)}", flush=True)
 
@@ -276,7 +276,7 @@ def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Name
         for batch_index, batch in enumerate(encoder.loader(frames[start_step:end_step])):
             steps, found, tokens = encoder.encode(batch)
             rows = (steps - first_step).numpy()
-            features[rows] = to_bf16_bits((tokens - mean) @ components)
+            features[rows] = to_bf16_bits((tokens - mean) @ components if project else tokens)
             done += len(rows)
             missing += int((~found).sum())
             if batch_index % 200 == 0:
@@ -295,12 +295,12 @@ def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Name
         "num_shards": args.num_shards,
         "lo": first_step,
         "hi": end_step,
-        "dim": args.pca_dim,
+        "dim": dim,
         "global_tokens": tokens_per_frame,
         "grid": args.grid,
         "encoder": args.encoder,
         "global_patches": args.global_patches,
-        "pca": str(pca_file),
+        "pca": str(pca_file) if project else None,
         "missing": missing,
     }
     with open(output_dir / f"meta_{tag}.json", "w") as f:

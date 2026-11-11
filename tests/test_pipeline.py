@@ -20,7 +20,10 @@ from wfemb.config import (
     parse_run_config,
 )
 
-BEST = "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_seed-0"
+BEST = (
+    "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2"
+    "_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0"
+)
 SMALL = dict(d_model=64, d_head=16, n_heads=4, n_layers=2, n_patches=16, batch_size=16, n_epochs=2, learning_rate=1e-3)
 
 
@@ -31,6 +34,7 @@ def test_ids_round_trip():
         Experiment(hard_negative_beta=2, seed=1),
         Experiment(architecture="gru", learning_rate=3e-4, dropout=0.1, n_patches=256),
         Experiment(learning_rate=1.5e-3, label_smoothing=0.0, n_layers=6),
+        Experiment(n_patches=1024, pca_dim=0),
     ]
     for experiment in experiments:
         assert Experiment.from_id(experiment.id) == experiment
@@ -42,6 +46,17 @@ def test_ids_round_trip():
 def test_bad_ids_are_rejected(bad_id):
     with pytest.raises(ValueError):
         Experiment.from_id(bad_id)
+
+
+def test_ids_without_a_later_variable_take_its_default():
+    assert Experiment.from_id(BEST.replace("_pca-512", "")) == Experiment()
+
+
+def test_frame_cache_names():
+    names = {(256, 512): "frames_dense", (576, 512): "frames_dense_g24", (1024, 512): "frames_dense_g32"}
+    names |= {(256, 0): "frames_dense_raw", (576, 0): "frames_dense_g24_raw", (576, 768): "frames_dense_g24_pca768"}
+    for (n_patches, pca_dim), name in names.items():
+        assert Experiment(n_patches=n_patches, pca_dim=pca_dim).frame_cache_name == name
 
 
 def test_command_line_accepts_an_id_and_overrides():

@@ -16,7 +16,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from ..config import REPO, default_results_root
+from ..config import REPO, Experiment, default_results_root
 from . import paths
 
 RNN_RESULTS = "rnn:/nas/ucb/dfeng/data/workflow-embeddings/results/"
@@ -101,6 +101,11 @@ def download(url: str, destination: Path, expected_size: int | None = None, max_
         )
 
 
+def current_run_path(path: Path) -> Path:
+    """A file of a run stored before an experiment variable was added: its place in today's results tree."""
+    return Experiment.from_id(str(path.parent)).relative_dir / path.name
+
+
 def fetch_baseten(
     results_root: Path, job_ids: list[str] | None, checkpoints: bool, embeddings: bool, screenshots: bool
 ):
@@ -111,7 +116,7 @@ def fetch_baseten(
     def local_path(name: str) -> Path | None:
         if name.startswith("results/"):
             wanted = (checkpoints or not name.endswith(".pt")) and (embeddings or not name.endswith(".npz"))
-            return results_root / name.removeprefix("results/") if wanted else None
+            return results_root / current_run_path(Path(name.removeprefix("results/"))) if wanted else None
         if name.startswith("bundles/"):
             return BUNDLES_DIR / name.removeprefix("bundles/")
         if name == SCREENSHOTS_ARCHIVE and screenshots:

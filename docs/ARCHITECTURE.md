@@ -106,8 +106,9 @@ validation loss (`best.pt`), and at the end evaluates that checkpoint on validat
 ## Evaluation (`wfemb/eval.py`)
 
 `evaluate` embeds every session of a split, then scores each step against the candidates with the false-negative mask
-at the fixed `eval.duplicate_threshold`, with one-hot targets (no smoothing, no hard-negative weights). Metric
-definitions: [EXPERIMENTS.md](EXPERIMENTS.md#metrics-wfembmetricspy).
+at the fixed `eval.duplicate_threshold`, with one-hot targets (no smoothing, no hard-negative weights). On the test
+split every metric is also reported for the sessions without and with an application that occurs in training
+(`WorkflowDataset.test_groups`). Metric definitions: [EXPERIMENTS.md](EXPERIMENTS.md#metrics-wfembmetricspy).
 
 ## Reading the frame cache (`wfemb/storage/frames.py`)
 

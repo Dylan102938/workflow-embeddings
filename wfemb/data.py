@@ -16,6 +16,9 @@ import torch
 from .config import ADDED, AGENTNET, DataConfig, Experiment, TrainConfig
 from .storage.frames import FrameStore, as_bfloat16, load_numpy, pinned_buffer_pool, read_file
 
+# Groups of test sessions that get their own metrics: none / at least one of a session's applications is in training.
+TEST_GROUPS = ("unseen_apps", "seen_app")
+
 # Batch field -> (array in prepared/events.npz, dtype in a batch)
 EVENT_ARRAYS = {
     "event_types": ("ev_type", np.int64),
@@ -139,6 +142,9 @@ class WorkflowDataset:
         group_ids = {name: index for index, name in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.groups = np.array([group_ids[session["group"]] for session in self.sessions])
 
+        training_apps = {key for index in self.agentnet_training_sessions() for key in self.sessions[index]["app_keys"]}
+        self.has_training_app = np.array([bool(training_apps & set(s["app_keys"])) for s in self.sessions])
+
         self.frames = FrameStore(frame_caches)
         if self.frames.n_patches != experiment.n_patches:
             raise ValueError(
@@ -149,6 +155,12 @@ class WorkflowDataset:
 
     def agentnet_training_sessions(self) -> np.ndarray:
         return np.nonzero((self.splits == "train") & (self.datasets == AGENTNET))[0]
+
+    def test_groups(self, session_indices: np.ndarray) -> dict[str, np.ndarray]:
+        """Masks over the given test sessions, by whether any of a session's applications occurs in AgentNet's
+        training split (the same sessions for every run, whatever it trains on)."""
+        seen = self.has_training_app[session_indices]
+        return dict(zip(TEST_GROUPS, (~seen, seen)))
 
     def sessions_in(self, split: str) -> np.ndarray:
         return np.nonzero(self.splits == split)[0]

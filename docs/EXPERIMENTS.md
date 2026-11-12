@@ -98,7 +98,7 @@ Every run writes raw data only (no summaries; the dashboard computes those) to
 | `config.json` | json | `{"id", "experiment": {...}, "train": {...}, "eval": {...}, "data": {...}, "model": {...}, "meta": {...}}` (meta: git commit, host, launcher, start time, n_params, steps_per_epoch, total_steps; `legacy` / `legacy_name` for imported pre-refactor runs) |
 | `steps.jsonl` | jsonl, one row per training step | `step, epoch, time, loss, rigid_loss, avg_dist, lr, grad_norm, beta, data_s, step_s` |
 | `evals.jsonl` | jsonl, one row every `eval_steps` (and at the last step) | `step, epoch, time, val_loss, val_r@1, val_r@5, val_avg_log_dist_100NN, max_mem_gb` |
-| `final.json` | json, written once at the end | `best_step, selected_on` and every `val_*` / `test_*` metric at the chosen checkpoint, `train_minutes` |
+| `final.json` | json, written once at the end | `best_step, selected_on` and every `val_*` / `test_*` metric at the chosen checkpoint (the test metrics also per group: `test_unseen_apps_*`, `test_seen_app_*`), `train_minutes` |
 | `test_embeddings.npz` | npz, written once at the end | every test step's direction (float16) and confidence at the chosen checkpoint: `session_indices`, `step_offsets`, `lengths` (one entry per session) and `directions`, `confidences` (one row per step; session i owns rows `step_offsets[i]` to `step_offsets[i] + lengths[i] - 1`). The demo is built from it. About 360 MB; fetched with `--embeddings` |
 | `best.pt`, `last.pt` | checkpoints | EMA weights and the model configuration; fetched with `--checkpoints` |
 
@@ -136,3 +136,9 @@ evaluated split's keys (val/test instructions never occur in training).
   among the candidates at the session's last step.
 - `val_avg_log_dist_100NN` (and `test_*`): for each session, the 100 candidates nearest its workflow embedding, minus
   its own label if it is among them; the mean log distance to them; averaged over sessions.
+- `test_unseen_apps_<metric>`, `test_seen_app_<metric>`: each test metric again over two groups of test sessions. A
+  test session has at least one held-out application, but it may use others too. `unseen_apps` are the sessions
+  none of whose applications occurs in AgentNet's training split (1,697 of 3,050); `seen_app` are those with at
+  least one that does (1,353). The groups are the same sessions for every run, whatever `data` it trains on. The
+  overall metric is their session-weighted mean. Validation has no such groups: it holds out instructions, not
+  applications.

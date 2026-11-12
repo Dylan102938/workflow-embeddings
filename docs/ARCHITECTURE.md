@@ -33,7 +33,7 @@ training sessions of datasets the run does not name are left unused.
 **Inputs per step**, all frozen and precomputed:
 
 - *screen tokens* `[n_patches, 512]`: SigLIP2 so400m patch features of the screenshot, pooled to a 16x16, 24x24 or
-  32x32 grid, channel PCA 1152 -> 512 (variable `pca`; 0 keeps all 1152 channels), stored as exact bfloat16;
+  32x32 grid, channel PCA 1152 -> 512, stored as exact bfloat16;
 - *events*, up to 8 per step: type, up to two screen points, scroll amount, up to 4 key tokens, and typed text (an
   index into the frozen Qwen3 embeddings of every typed string).
 

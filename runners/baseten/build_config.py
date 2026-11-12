@@ -1,5 +1,5 @@
 """Baseten job: build frame caches (see runners/baseten/build.sh). Push from the repo root:
-WFEMB_SPECS="siglip2:32 siglip2:16:0" WFEMB_GPUS=2 truss train push runners/baseten/build_config.py --job-name build
+WFEMB_SPECS="siglip2:24 siglip2:32" WFEMB_GPUS=2 truss train push runners/baseten/build_config.py --job-name build
 WFEMB_SET=added builds the caches of the added datasets."""
 
 import os

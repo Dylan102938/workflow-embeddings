@@ -19,7 +19,7 @@ DATA/prepared/         sessions.pkl, events.npz, vocab.json, summary.json       
 DATA/keys/             the default key set (Qwen3-Embedding-0.6B) and the files every key set shares:
                        paraphrases.json, judged_<split>.jsonl, text_vecs.npy
 DATA/keys_openai/      the label key set used for training (OpenAI text-embedding-3-large)   (openai_keys.py)
-BULK/frames_dense[_g<grid>][_raw]/   frozen screen features, one folder per grid size and projection   (cache_frames.py)
+BULK/frames_dense[_g<grid>]/   frozen screen features, one folder per grid size   (cache_frames.py)
 BULK/dense_pca_g<grid>_d<dim>.npz   the PCA basis of that cache
 DATA/added/, BULK/added/   the same layout for the datasets added to AgentNet (see "Added datasets")
 ```
@@ -193,10 +193,9 @@ were not written yet, or pairs are duplicated.
 
 Every step's screenshot is encoded once with the frozen SigLIP2 so400m NaFlex encoder (aspect ratio kept, at most
 `--global_patches` patches). The patch grid is adaptive-average-pooled to `--grid` × `--grid` tokens and every
-token is projected from 1152 to `--pca_dim` channels (`--pca_dim 0`: no projection, all 1152 channels are stored).
-The number of tokens per frame, grid², is the experiment variable `patch`; `--pca_dim` is the variable `pca`. The
-cache folder is `frames_dense[_g<grid>][_raw]` (`config.frame_cache_name`). On Baseten:
-`WFEMB_SPECS="siglip2:32 siglip2:16:0" truss train push runners/baseten/build_config.py`.
+token is projected from 1152 to `--pca_dim` channels (512). The number of tokens per frame, grid², is the
+experiment variable `patch`. The cache folder is `frames_dense[_g<grid>]` (`config.frame_cache_name`). On Baseten:
+`WFEMB_SPECS="siglip2:24 siglip2:32" truss train push runners/baseten/build_config.py`.
 
 `--mode pca_fit` fits the projection on the tokens of `--pca_frames` random **training** frames and writes
 `dense_pca_g<grid>_d<pca_dim>.npz`: `mean` [1152], `comps` [1152, pca_dim], `cum_var`, `n_tokens`.

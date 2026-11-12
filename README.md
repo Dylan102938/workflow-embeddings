@@ -1,6 +1,7 @@
 # workflow-embeddings
 
-Session embeddings for computer-use workflows, trained on AgentNet (OpenCUA). A per-step transformer reads one
+Session embeddings for computer-use workflows, trained on AgentNet (OpenCUA) and, optionally, on sessions converted
+from VideoCUA, ScaleCUA and GUI-360. A per-step transformer reads one
 (screenshot, input events) step at a time and carries a history token from step to step. At each step it outputs a
 direction in a frozen text-embedding space (the intent it currently believes) and a confidence κ; training is
 per-step InfoNCE against every training instruction's frozen text key.
@@ -22,7 +23,8 @@ wfemb/
   metrics.py     the objective and every tracked metric
   model/         transformer.py (workflow encoder), events.py (event tokens), gru.py (GRU final block)
   storage/       paths.py, frames.py (frame-cache reader), results.py (results tree), jobs.py (run queue), fetch.py
-  prep/          one-time data preparation (sessions, actions, frame caches, text embeddings, keys, judged pools)
+  prep/          one-time data preparation (sessions, actions, frame caches, text embeddings, keys, judged pools;
+                 sources/ + add_datasets.py + clean.py + held_out.py: the datasets added to AgentNet)
   demo/          exports Intent Replay bundles for the dashboard
 dashboard/       local results dashboard (runs, curves, seed aggregation, ablations, job queue, demo viewer)
 jobs.txt         the run queue: run ids in named sections, one section per launch

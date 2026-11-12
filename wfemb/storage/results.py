@@ -1,7 +1,7 @@
 """The results tree: each run's raw data in <root>/<one folder per id segment>/ (layout: docs/EXPERIMENTS.md).
 
 python -m wfemb.storage.results list       # every run: status, last step, id
-python -m wfemb.storage.results migrate    # move runs to the folders their config.json implies
+python -m wfemb.storage.results migrate    # move runs to the folders their config.json implies; delete obsolete ones
 """
 
 from __future__ import annotations
@@ -75,10 +75,21 @@ class RunWriter:
 
 
 def iter_runs(root: str | Path) -> Iterator[tuple[Experiment, Path]]:
-    """(experiment, run folder) for every folder under root that holds a config.json."""
+    """(experiment, run folder) for every folder under root that holds a config.json of a run that still exists."""
     for config_path in sorted(Path(root).rglob("config.json")):
-        config = json.loads(config_path.read_text())
-        yield Experiment(**config["experiment"]), config_path.parent
+        experiment = Experiment.from_saved(json.loads(config_path.read_text())["experiment"])
+        if experiment is not None:
+            yield experiment, config_path.parent
+
+
+def obsolete_runs(root: str | Path) -> list[Path]:
+    """Folders of runs that used a variable that was removed since."""
+    config_paths = sorted(Path(root).rglob("config.json"))
+    return [
+        path.parent
+        for path in config_paths
+        if Experiment.from_saved(json.loads(path.read_text())["experiment"]) is None
+    ]
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -93,7 +104,12 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def migrate(root: Path, dry_run: bool = False):
-    """After an experiment variable is added or renamed: move every run to the folder its config.json implies."""
+    """After an experiment variable is added, renamed or removed: move every run to the folder its config.json
+    implies, and delete the runs that used a removed variable."""
+    for run_dir in obsolete_runs(root):
+        print(f"{run_dir.relative_to(root)}: used a removed variable, {'to delete' if dry_run else 'deleted'}")
+        if not dry_run:
+            shutil.rmtree(run_dir)
     n_moved = 0
     for experiment, run_dir in list(iter_runs(root)):
         target = Path(root) / experiment.relative_dir

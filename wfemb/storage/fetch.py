@@ -111,7 +111,7 @@ def fetch_baseten(
 ):
     if not job_ids:
         job_ids = [job["id"] for job in baseten_jobs() if job["current_status"].endswith(("COMPLETED", "RUNNING"))]
-    demo_dir = paths.DATA / "demo"
+    demo_dir = paths.AGENTNET_DATA / "demo"
 
     def local_path(name: str) -> Path | None:
         if name.startswith("results/"):
@@ -121,6 +121,8 @@ def fetch_baseten(
             return BUNDLES_DIR / name.removeprefix("bundles/")
         if name == SCREENSHOTS_ARCHIVE and screenshots:
             return demo_dir / name
+        if name.startswith(f"{paths.ADDED}/"):  # files prepared on Baseten for the added datasets (paraphrases)
+            return paths.AGENTNET_DATA / name
         return None
 
     for job_id in job_ids:

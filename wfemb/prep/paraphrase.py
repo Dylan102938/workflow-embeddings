@@ -95,7 +95,9 @@ def distinct_paraphrases(reply: str, instruction: str, count: int) -> list[str]:
 
 
 def parse_paraphrases(reply: str, limit: int) -> list[str]:
-    """The strings of the JSON array in the reply; if there is none, one paraphrase per (numbered or bulleted) line."""
+    """The strings of the JSON array in the reply; if it is not one array, one paraphrase per line.
+
+    A line may be numbered or bulleted, or an array of its own: ["Please resize the clip."]"""
     array = re.search(r"\[.*\]", reply, flags=re.S)
     if array:
         try:
@@ -103,8 +105,8 @@ def parse_paraphrases(reply: str, limit: int) -> list[str]:
             return [str(item).strip() for item in items if isinstance(item, str) and item.strip()][:limit]
         except json.JSONDecodeError:
             pass
-    lines = [re.sub(r"^\s*(\d+[.)]|[-*])\s*", "", line).strip().strip('",') for line in reply.splitlines()]
-    return [line for line in lines if len(line) > 3 and not line.startswith(("[", "]"))][:limit]
+    lines = [re.sub(r"^\s*(\d+[.)]|[-*])\s*", "", line).strip(" \t[],").strip('"') for line in reply.splitlines()]
+    return [line for line in lines if len(line) > 3][:limit]
 
 
 if __name__ == "__main__":

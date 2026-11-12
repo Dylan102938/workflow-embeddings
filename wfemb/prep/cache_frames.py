@@ -44,11 +44,13 @@ class Frame(NamedTuple):
 
 def main() -> None:
     args = parse_arguments()
-    output_dir = paths.BULK / frame_cache_name(args.grid, args.pca_dim)
+    output_dir = paths.BULK / frame_cache_name(args.grid)
     output_dir.mkdir(parents=True, exist_ok=True)
     frames = all_frames(load_sessions())
     encoder = ScreenEncoder(args)
     if args.mode == "pca_fit":
+        if paths.ON_ADDED_SET:
+            raise SystemExit("the PCA basis is fitted on AgentNet only")
         fit_pca(encoder, frames, args)
     else:
         write_shard(encoder, frames, args, output_dir)
@@ -69,7 +71,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--grid", type=int, default=DEFAULT_GRID, help="tokens per frame = grid^2 (the experiment's patch)"
     )
-    parser.add_argument("--pca_dim", type=int, default=512, help="0: keep the encoder's channels (no PCA)")
+    parser.add_argument("--pca_dim", type=int, default=512)
     parser.add_argument("--pca_frames", type=int, default=16000)
     parser.add_argument("--batch", dest="batch_size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=10)
@@ -77,7 +79,8 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def pca_path(grid: int, pca_dim: int) -> Path:
-    return paths.BULK / f"dense_pca_g{grid}_d{pca_dim}.npz"
+    """The basis fitted on AgentNet's training frames; the added datasets are projected with it too."""
+    return paths.AGENTNET_BULK / f"dense_pca_g{grid}_d{pca_dim}.npz"
 
 
 def all_frames(sessions: list[dict]) -> list[Frame]:
@@ -91,7 +94,7 @@ def all_frames(sessions: list[dict]) -> list[Frame]:
 
 # ------------------------------------------------------------------------------------------------- encoding
 class FrameDataset(torch.utils.data.Dataset):
-    """Screenshots read from the AgentNet archives in place, preprocessed for SigLIP2 NaFlex."""
+    """Screenshots read from the image archives in place, preprocessed for SigLIP2 NaFlex."""
 
     def __init__(self, frames: list[Frame], encoder: str, max_patches: int):
         self.frames, self.encoder, self.max_patches = frames, encoder, max_patches
@@ -101,7 +104,8 @@ class FrameDataset(torch.utils.data.Dataset):
         from transformers import AutoImageProcessor
 
         self.processor = AutoImageProcessor.from_pretrained(self.encoder)
-        self.archives = {source: SplitZip(zip_path) for source, zip_path in paths.ZIPS.items()}
+        sources = {frame.source for frame in self.frames}
+        self.archives = {source: SplitZip(paths.ZIPS[source]) for source in sources}
         self.member_paths = {source: archive.basename_index() for source, archive in self.archives.items()}
 
     def __len__(self) -> int:
@@ -247,12 +251,9 @@ def sample_training_frames(frames: list[Frame], sample_size: int) -> list[Frame]
 # ---------------------------------------------------------------------------------------------- cache shards
 def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Namespace, output_dir: Path) -> None:
     """Writes global_<tag>.npy for this shard's steps, then meta_<tag>.json; an interrupted shard resumes."""
-    project = args.pca_dim > 0
-    pca_file = pca_path(args.grid, args.pca_dim) if project else None
-    dim = args.pca_dim if project else encoder.hidden_size
-    if project:
-        pca = np.load(pca_file)
-        mean, components = torch.from_numpy(pca["mean"]).cuda(), torch.from_numpy(pca["comps"]).cuda()
+    pca_file = pca_path(args.grid, args.pca_dim)
+    pca = np.load(pca_file)
+    mean, components = torch.from_numpy(pca["mean"]).cuda(), torch.from_numpy(pca["comps"]).cuda()
     bounds = np.linspace(0, len(frames), args.num_shards + 1).astype(int)
     first_step, end_step = int(bounds[args.shard]), int(bounds[args.shard + 1])
     tag = f"{args.shard:02d}of{args.num_shards:02d}"
@@ -266,7 +267,7 @@ def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Name
         print(f"resuming at {start_step}", flush=True)
     else:
         features = np.lib.format.open_memmap(
-            features_path, mode="w+", dtype=np.uint16, shape=(end_step - first_step, tokens_per_frame, dim)
+            features_path, mode="w+", dtype=np.uint16, shape=(end_step - first_step, tokens_per_frame, args.pca_dim)
         )
     print(f"dense shard {tag}: frames [{first_step}, {end_step}) of {len(frames)}", flush=True)
 
@@ -276,7 +277,7 @@ def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Name
         for batch_index, batch in enumerate(encoder.loader(frames[start_step:end_step])):
             steps, found, tokens = encoder.encode(batch)
             rows = (steps - first_step).numpy()
-            features[rows] = to_bf16_bits((tokens - mean) @ components if project else tokens)
+            features[rows] = to_bf16_bits((tokens - mean) @ components)
             done += len(rows)
             missing += int((~found).sum())
             if batch_index % 200 == 0:
@@ -295,12 +296,12 @@ def write_shard(encoder: ScreenEncoder, frames: list[Frame], args: argparse.Name
         "num_shards": args.num_shards,
         "lo": first_step,
         "hi": end_step,
-        "dim": dim,
+        "dim": args.pca_dim,
         "global_tokens": tokens_per_frame,
         "grid": args.grid,
         "encoder": args.encoder,
         "global_patches": args.global_patches,
-        "pca": str(pca_file) if project else None,
+        "pca": str(pca_file),
         "missing": missing,
     }
     with open(output_dir / f"meta_{tag}.json", "w") as f:

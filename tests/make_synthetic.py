@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from wfemb.config import ADDED_DATASETS
+
 N_PATCHES, D_SCREEN, D_LABEL = 16, 32, 64
 MAX_EVENTS, MAX_KEYS, N_TEXTS, N_INTENTS, N_APPS = 8, 4, 50, 40, 7
 
@@ -25,30 +27,49 @@ def unit_rows(values: np.ndarray) -> np.ndarray:
 
 
 def main(root, n_sessions: int = 300, seed: int = 0):
-    rng = np.random.default_rng(seed)
     root = Path(root)
-    frames_dir = root / "bulk" / "frames_dense_g4"
+    write_prepared_set(root, root / "bulk" / "frames_dense_g4", n_sessions, seed, added=False)
+
+
+def add_synthetic_datasets(root, n_sessions: int = 90, seed: int = 1):
+    """A second prepared set below root/added, as wfemb.prep.add_datasets writes it: all training data."""
+    root = Path(root)
+    write_prepared_set(root / "added", root / "bulk" / "added" / "frames_dense_g4", n_sessions, seed, added=True)
+
+
+def write_prepared_set(root: Path, frames_dir: Path, n_sessions: int, seed: int, added: bool):
+    rng = np.random.default_rng(seed)
     for folder in (root / "prepared", root / "keys_openai", root / "keys", frames_dir):
         folder.mkdir(parents=True, exist_ok=True)
 
     intents = rng.integers(0, N_INTENTS, n_sessions)
-    intent_centers = rng.normal(size=(N_INTENTS, D_LABEL))
+    intent_centers = np.random.default_rng(0).normal(size=(N_INTENTS, D_LABEL))  # shared by both sets
     lengths = rng.integers(2, 25, n_sessions)
     n_steps = int(lengths.sum())
 
     def split_of(index: int) -> str:
+        if added:
+            return "train"
         return "train" if index < 0.7 * n_sessions else "val" if index < 0.85 * n_sessions else "test"
+
+    prefix = "added" if added else "s"
+
+    def app_of(index: int) -> str:
+        """Half of the test sessions use applications that no training session has."""
+        held_out = split_of(index) == "test" and index % 2 == 0
+        return f"app:{'new' if held_out else ''}{intents[index] % N_APPS}"
 
     sessions = [
         {
-            "id": f"s{index}",
+            "id": f"{prefix}{index}",
             "source": "ubuntu",
+            **({"dataset": ADDED_DATASETS[index % len(ADDED_DATASETS)], "origin": "human"} if added else {}),
             "instruction": f"task {intents[index]} v{index}",
-            "group": f"g{index if index % 10 else index - 1}",
+            "group": f"{prefix}g{index if index % 10 else index - 1}",
             "os": ["Windows", "Darwin", "Ubuntu"][index % 3],
             "domain": "x",
-            "app": f"app:{intents[index] % N_APPS}",
-            "app_keys": [f"app:{intents[index] % N_APPS}"],
+            "app": app_of(index),
+            "app_keys": [app_of(index)],
             "task_completed": True,
             "screen": (1920, 1080),
             "split": split_of(index),
@@ -95,7 +116,7 @@ def main(root, n_sessions: int = 300, seed: int = 0):
     np.save(labels_dir / "para_keys.npy", paraphrase_keys.astype(np.float16))
     np.savez(labels_dir / "para_index.npz", offset=np.r_[0, np.cumsum(paraphrase_counts)[:-1]], count=paraphrase_counts)
 
-    for split in ("val", "test"):  # judged pairs: same intent = 2, same app = 1
+    for split in () if added else ("val", "test"):  # judged pairs: same intent = 2, same app = 1
         members = [index for index, session in enumerate(sessions) if session["split"] == split]
         with open(root / "keys" / f"judged_{split}.jsonl", "w") as file:
             for first in members:
@@ -105,7 +126,7 @@ def main(root, n_sessions: int = 300, seed: int = 0):
                     if first < second and (same_intent or same_app):
                         file.write(json.dumps({"a": first, "b": second, "label": 2 if same_intent else 1}) + "\n")
 
-    projection = rng.normal(size=(D_LABEL, D_SCREEN)) / np.sqrt(D_LABEL)
+    projection = np.random.default_rng(0).normal(size=(D_LABEL, D_SCREEN)) / np.sqrt(D_LABEL)
     session_features = intent_centers[intents] @ projection
     frames = np.repeat(session_features, lengths, 0)[:, None, :] + rng.normal(size=(n_steps, N_PATCHES, D_SCREEN))
     middle = n_steps // 2

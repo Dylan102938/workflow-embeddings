@@ -23,6 +23,7 @@ SECONDS_BEFORE_ACTION = 0.1  # a step's screenshot is the video frame this long 
 END_TYPES = {"AFTER_LAST_ACTION", "TERMINATE", "TERMINATE_SUCCESS"}
 BUTTONS = {"left", "right", "middle"}
 SEEKS_PER_COMMAND = 16
+CSV_ROW = re.compile(r'\d+\s*,\s*"(.*)"', re.S)
 
 
 @dataclass
@@ -95,7 +96,7 @@ def convert_task(job: tuple[str, str]) -> tuple[dict | None, list[ConvertedImage
     ]
     record = {
         "task_id": session,
-        "instruction": with_application(str(log.get("task_instruction") or "").strip(), application),
+        "instruction": with_application(unwrapped(str(log.get("task_instruction") or "")), application),
         "traj": [
             {"index": index, "image": image.name, "value": {"code": "\n".join(step.calls)}}
             for index, (step, image) in enumerate(zip(steps, images))
@@ -114,6 +115,12 @@ def convert_task(job: tuple[str, str]) -> tuple[dict | None, list[ConvertedImage
 
 def slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "", name)
+
+
+def unwrapped(instruction: str) -> str:
+    """Some instructions are a spreadsheet row: 23,"Right-click an editor tab ..."."""
+    row = CSV_ROW.fullmatch(instruction.strip())
+    return row.group(1).strip() if row else instruction.strip()
 
 
 def with_application(instruction: str, application: str) -> str:

@@ -70,6 +70,8 @@ def test_videocua_instruction_names_its_application():
     assert videocua.with_application("Open the help guide.", "7-Zip") == "In 7-Zip, open the help guide."
     assert videocua.with_application("PDF export of the file", "Calibre") == "In Calibre, PDF export of the file"
     assert videocua.with_application("Open GIMP preferences", "GIMP") == "Open GIMP preferences"
+    assert videocua.unwrapped('23,"Right-click an editor tab."') == "Right-click an editor tab."
+    assert videocua.unwrapped(' Open 3 files, then "Save all" ') == 'Open 3 files, then "Save all"'
 
 
 @pytest.mark.parametrize(

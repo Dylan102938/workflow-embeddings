@@ -15,9 +15,10 @@ retry hf download Dylan123/wfemb-data --repo-type dataset --local-dir "$WFEMB_DA
     --include "${SUB}prepared/*" >/dev/null
 retry hf download "$MODEL" --token "$HF_TOKEN" >/dev/null       # into HF_HOME, so vLLM starts without the hub
 pip install -q --root-user-action=ignore uv
+command -v gcc >/dev/null || { apt-get update -qq >/dev/null && apt-get install -y -qq gcc >/dev/null; }   # triton compiles at run time
 export VLLM_CACHE_ROOT=$TEAM/vllm-cache
 log=$BT_SCRATCH_DIR/paraphrase.log
-HF_HUB_OFFLINE=1 PYTHONPATH=$PWD uv run --isolated --no-project --python 3.11 --with "vllm==0.8.5" --with "transformers==4.51.3" \
+HF_HUB_OFFLINE=1 PYTHONPATH=$PWD uv run --isolated --no-project --python 3.11 --with "vllm==0.8.5" --with "transformers==4.51.3" --with setuptools \
     python -m wfemb.prep.paraphrase --model "$MODEL" > "$log" 2>&1 \
     || { echo "FAILED; errors in the log:"; grep -a -i -B3 -A12 "error\|traceback" "$log" | head -n 200; exit 1; }
 tail -n 40 "$log"

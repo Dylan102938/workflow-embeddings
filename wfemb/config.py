@@ -18,6 +18,10 @@ from .storage.paths import ADDED, ADDED_DATASETS, AGENTNET
 REPO = Path(__file__).resolve().parent.parent
 ARCHITECTURES = ("transf", "late-history-transf", "gru")
 
+# Variables that were removed again: id key -> (field, the value every kept run had). Ids, result folders and
+# config.json files written while the variable existed are still read if they have that value.
+REMOVED_VARIABLES = {"pca": ("pca_dim", "512")}
+
 # Run-id key -> Experiment field, in id order.
 ID_KEYS = {
     "arch": "architecture",
@@ -32,7 +36,6 @@ ID_KEYS = {
     "bs": "batch_size",
     "ep": "n_epochs",
     "beta": "hard_negative_beta",
-    "pca": "pca_dim",
     "data": "training_data",
     "seed": "seed",
 }
@@ -54,7 +57,6 @@ class Experiment:
     batch_size: int = 64
     n_epochs: int = 45
     hard_negative_beta: float = 0.0
-    pca_dim: int = 512  # channels the screen features are PCA-projected to; 0 = unprojected
     training_data: str = AGENTNET  # datasets trained on, joined by "+"; "all" = AgentNet and every added dataset
     seed: int = 0
 
@@ -66,8 +68,6 @@ class Experiment:
             raise ValueError(f"architecture {self.architecture} needs n_layers >= 2")
         if math.isqrt(self.n_patches) ** 2 != self.n_patches:
             raise ValueError(f"n_patches must be a square number (256, 576, ...), got {self.n_patches}")
-        if self.pca_dim < 0:
-            raise ValueError(f"pca_dim must be 0 (unprojected) or a channel count, got {self.pca_dim}")
         unknown = set(self.training_datasets) - {AGENTNET, *ADDED_DATASETS}
         if unknown or self.training_datasets[0] != AGENTNET:
             raise ValueError(
@@ -91,11 +91,22 @@ class Experiment:
         values = {}
         for segment in run_id.strip().strip("/").replace("/", "_").split("_"):
             key, separator, text = segment.partition("-")
+            if REMOVED_VARIABLES.get(key, (None, None))[1] == text:
+                continue
             if not separator or key not in ID_KEYS:
                 raise ValueError(f"bad id segment {segment!r} in {run_id!r}")
             field = ID_KEYS[key]
             values[field] = type(getattr(defaults, field))(text)
         return cls(**values)
+
+    @classmethod
+    def from_saved(cls, fields: dict) -> Experiment | None:
+        """The experiment of a config.json; None if the run used a variable that was removed (the run is obsolete)."""
+        fields = dict(fields)
+        for field, kept_value in REMOVED_VARIABLES.values():
+            if str(fields.pop(field, kept_value)) != kept_value:
+                return None
+        return cls(**fields)
 
     @property
     def training_datasets(self) -> tuple[str, ...]:
@@ -113,13 +124,11 @@ class Experiment:
 
     @property
     def frame_cache_name(self) -> str:
-        return frame_cache_name(self.patch_grid_size, self.pca_dim)
+        return frame_cache_name(self.patch_grid_size)
 
 
-def frame_cache_name(grid_size: int, pca_dim: int) -> str:
-    grid = "" if grid_size == 16 else f"_g{grid_size}"
-    projection = {512: "", 0: "_raw"}.get(pca_dim, f"_pca{pca_dim}")
-    return f"frames_dense{grid}{projection}"
+def frame_cache_name(grid_size: int) -> str:
+    return "frames_dense" if grid_size == 16 else f"frames_dense_g{grid_size}"
 
 
 def format_id_value(value) -> str:

@@ -1,8 +1,7 @@
 #!/bin/bash
 # Build frozen-encoder frame caches on Baseten: AgentNet screenshots (public HF dataset) + our private derived data
 # (Dylan123/wfemb-data: prepared sessions/events, key sets, PCA bases fitted on rnn) -> dense caches in the team cache.
-# Usage: bash runners/baseten/build.sh "SPEC [SPEC ...]" [agentnet|added]   SPEC = siglip2:<grid>[:<pca_dim>]
-#   siglip2:24 -> patch 576 with the default PCA (512 channels); siglip2:16:0 -> patch 256, unprojected (pca-0).
+# Usage: bash runners/baseten/build.sh "SPEC [SPEC ...]" [agentnet|added]   SPEC = siglip2:<grid> (siglip2:24 -> patch 576)
 #   A PCA basis that is missing from the team cache is fitted first (on AgentNet only).
 #   added: the caches of the added datasets ($TEAM/bulk/added), projected with AgentNet's bases.
 set -euo pipefail
@@ -33,10 +32,10 @@ W=$(( NCPU / NG - 2 )); (( W > 24 )) && W=24; (( W < 2 )) && W=2
 echo "$NG GPUs, $NCPU CPUs -> $W loader workers per shard; memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null)"
 NSH=8                                         # shards per cache, built in waves of NG; finished shards leave local disk
 for spec in $SPECS; do
-    IFS=: read -r enc grid pca <<< "$spec"; pca=${pca:-512}
-    name=$(python -c "from wfemb.config import frame_cache_name; print(frame_cache_name($grid, $pca))")
+    grid=${spec##*:}; pca=512
+    name=$(python -c "from wfemb.config import frame_cache_name; print(frame_cache_name($grid))")
     basis=dense_pca_g${grid}_d${pca}.npz
-    if [ "$pca" != 0 ] && [ ! -f "$WFEMB_BULK/$basis" ]; then
+    if [ ! -f "$WFEMB_BULK/$basis" ]; then
         [ "$WFEMB_SET" = agentnet ] || { echo "no $basis: build AgentNet's cache for $spec first"; exit 1; }
         python -m wfemb.prep.cache_frames --mode pca_fit --grid "$grid" --pca_dim "$pca" --workers "$W" \
             > "$BT_SCRATCH_DIR/pca_fit_${grid}_${pca}.log" 2>&1 || { echo "FAILED pca_fit $spec"; tail -20 "$BT_SCRATCH_DIR/pca_fit_${grid}_${pca}.log"; exit 1; }

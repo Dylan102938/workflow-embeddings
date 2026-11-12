@@ -34,7 +34,6 @@ VARS = [  # key, default (docs/EXPERIMENTS.md order)
     ("bs", 64),
     ("ep", 45),
     ("beta", 0),
-    ("pca", 512),
     ("data", "agentnet"),
     ("seed", 0),
 ]

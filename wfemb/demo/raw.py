@@ -217,17 +217,15 @@ def embed_workflow(
     return directions[0].float().cpu().numpy(), confidences[0].squeeze(-1).float().cpu().numpy()
 
 
-def default_channel_pca_path(experiment) -> Path | None:
-    if experiment.pca_dim == 0:
-        return None
-    return paths.BULK / f"dense_pca_g{experiment.patch_grid_size}_d{experiment.pca_dim}.npz"
+def default_channel_pca_path(experiment) -> Path:
+    return paths.BULK / f"dense_pca_g{experiment.patch_grid_size}_d512.npz"
 
 
 @torch.no_grad()
 def encode_screenshots(
-    screenshots: list[Image.Image], device: torch.device, channel_pca_path: Path | None, grid_size: int
+    screenshots: list[Image.Image], device: torch.device, channel_pca_path: Path, grid_size: int
 ) -> np.ndarray:
-    """[L, grid_size ** 2, channels] bfloat16 bits, as `prep/cache_frames.py --mode dense` caches training frames."""
+    """[L, grid_size ** 2, 512] bfloat16 bits, as `prep/cache_frames.py --mode dense` caches training frames."""
     from ..prep.cache_frames import pool_grid, to_bf16_bits
 
     processor, vision_model, mean, components = load_screen_encoder(device, channel_pca_path)
@@ -244,22 +242,20 @@ def encode_screenshots(
             spatial_shapes=spatial_shapes.to(device),
         ).last_hidden_state
         pooled = pool_grid(hidden, spatial_shapes, (grid_size, grid_size))
-        encoded.append(to_bf16_bits(pooled if components is None else (pooled - mean) @ components))
+        encoded.append(to_bf16_bits((pooled - mean) @ components))
     return np.concatenate(encoded)
 
 
 @functools.cache
-def load_screen_encoder(device: torch.device, channel_pca_path: Path | None):
-    """(image processor, SigLIP2 vision model, channel-PCA mean, channel-PCA components); no path: no projection."""
+def load_screen_encoder(device: torch.device, channel_pca_path: Path):
+    """(image processor, SigLIP2 vision model, channel-PCA mean, channel-PCA components)."""
     from transformers import AutoImageProcessor, Siglip2VisionModel
 
     processor = AutoImageProcessor.from_pretrained(SCREEN_ENCODER)
     model = Siglip2VisionModel.from_pretrained(SCREEN_ENCODER, torch_dtype=torch.bfloat16, attn_implementation="sdpa")
-    mean = components = None
-    if channel_pca_path is not None:
-        channel_pca = np.load(channel_pca_path)
-        mean = torch.from_numpy(channel_pca["mean"]).to(device)
-        components = torch.from_numpy(channel_pca["comps"]).to(device)
+    channel_pca = np.load(channel_pca_path)
+    mean = torch.from_numpy(channel_pca["mean"]).to(device)
+    components = torch.from_numpy(channel_pca["comps"]).to(device)
     return processor, model.vision_model.to(device).eval(), mean, components
 
 

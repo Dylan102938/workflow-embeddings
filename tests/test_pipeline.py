@@ -1,6 +1,7 @@
 """Run ids, and end-to-end training on synthetic data (tests/make_synthetic.py)."""
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +23,7 @@ from wfemb.config import (
 
 BEST = (
     "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2"
-    "_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_data-agentnet_seed-0"
+    "_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-agentnet_seed-0"
 )
 SMALL = dict(d_model=64, d_head=16, n_heads=4, n_layers=2, n_patches=16, batch_size=16, n_epochs=2, learning_rate=1e-3)
 
@@ -34,7 +35,7 @@ def test_ids_round_trip():
         Experiment(hard_negative_beta=2, seed=1),
         Experiment(architecture="gru", learning_rate=3e-4, dropout=0.1, n_patches=256),
         Experiment(learning_rate=1.5e-3, label_smoothing=0.0, n_layers=6),
-        Experiment(n_patches=1024, pca_dim=0),
+        Experiment(n_patches=1024, training_data="all"),
     ]
     for experiment in experiments:
         assert Experiment.from_id(experiment.id) == experiment
@@ -49,14 +50,24 @@ def test_bad_ids_are_rejected(bad_id):
 
 
 def test_ids_without_a_later_variable_take_its_default():
-    assert Experiment.from_id(BEST.replace("_pca-512", "")) == Experiment()
+    assert Experiment.from_id(BEST.replace("_data-agentnet", "")) == Experiment()
+
+
+def test_a_removed_variable_is_read_only_at_the_value_that_was_kept():
+    with_removed = BEST.replace("_data-agentnet", "_pca-512_data-agentnet")
+    assert Experiment.from_id(with_removed) == Experiment()
+    assert Experiment.from_id(with_removed.replace("_", "/")).id == BEST
+    with pytest.raises(ValueError):
+        Experiment.from_id(with_removed.replace("pca-512", "pca-0"))
+    saved = {"d_model": 512, "seed": 1}
+    assert Experiment.from_saved({**saved, "pca_dim": 512}) == Experiment(seed=1)
+    assert Experiment.from_saved({**saved, "pca_dim": 0}) is None
 
 
 def test_frame_cache_names():
-    names = {(256, 512): "frames_dense", (576, 512): "frames_dense_g24", (1024, 512): "frames_dense_g32"}
-    names |= {(256, 0): "frames_dense_raw", (576, 0): "frames_dense_g24_raw", (576, 768): "frames_dense_g24_pca768"}
-    for (n_patches, pca_dim), name in names.items():
-        assert Experiment(n_patches=n_patches, pca_dim=pca_dim).frame_cache_name == name
+    names = {256: "frames_dense", 576: "frames_dense_g24", 1024: "frames_dense_g32"}
+    for n_patches, name in names.items():
+        assert Experiment(n_patches=n_patches).frame_cache_name == name
 
 
 def test_command_line_accepts_an_id_and_overrides():
@@ -138,8 +149,19 @@ def test_eval_command_and_migration(data_config, tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert "test" in completed.stdout and "r@5" in completed.stdout
 
+    def write_with_removed_variable(run_dir: Path, value: int):
+        saved = json.loads((run_dir / "config.json").read_text())
+        saved["experiment"]["pca_dim"] = value
+        (run_dir / "config.json").write_text(json.dumps(saved))
+
     misplaced = tmp_path / "old" / "place"
     misplaced.parent.mkdir(parents=True)
     (tmp_path / experiment.relative_dir).rename(misplaced)
+    write_with_removed_variable(misplaced, 512)
+    obsolete = tmp_path / "old" / "unprojected"
+    shutil.copytree(misplaced, obsolete)
+    write_with_removed_variable(obsolete, 0)
     migrate(tmp_path)
     assert [run_dir for _, run_dir in iter_runs(tmp_path)] == [tmp_path / experiment.relative_dir]
+    assert not obsolete.exists()
+    assert "pca_dim" not in json.loads((tmp_path / experiment.relative_dir / "config.json").read_text())["experiment"]

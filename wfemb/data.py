@@ -31,7 +31,7 @@ class Batch:
     """B sessions padded to T steps; E event slots per step. Padding repeats a session's last step."""
 
     session_indices: torch.Tensor  # [B]
-    frames: torch.Tensor  # [B, T, n_patches, channels] bfloat16
+    frames: torch.Tensor  # [B, T, n_patches, 512] bfloat16
     event_types: torch.Tensor  # [B, T, E], 0 = empty slot
     event_points: torch.Tensor  # [B, T, E, 4] (x, y, x2, y2), nan = absent
     event_scrolls: torch.Tensor  # [B, T, E]

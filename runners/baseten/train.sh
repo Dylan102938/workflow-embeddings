@@ -24,7 +24,7 @@ CACHES=$(for l in "${RUNS[@]}"; do python -m wfemb.config "id=${l%% *}" | sed -n
 if grep -q "^added/" <<< "$CACHES"; then                       # some run trains on the added datasets
     mkdir -p "$WFEMB_DATA/added"; cp -r "$TEAM"/data/added/{prepared,keys,keys_openai} "$WFEMB_DATA/added/"
 fi
-for n in $CACHES; do stage_frames "$n"; done
+for n in $CACHES; do stage_frames "$n"; python runners/baseten/cache_summary.py "$WFEMB_BULK/$n"; done
 echo "data staged in $(( $(date +%s) - t0 ))s: $(du -sh "$WFEMB_BULK" | cut -f1) frames; mem $(free -g | awk '/Mem/{print $2"G total, "$7"G avail"}')"
 NG=$(nvidia-smi -L | wc -l); pids=(); tails=()
 for i in "${!RUNS[@]}"; do

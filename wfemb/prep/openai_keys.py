@@ -43,7 +43,7 @@ def main() -> None:
     paraphrase_texts, owners = key_set.session_paraphrases(sessions, paraphrases)
     paraphrase_vectors, paraphrase_tokens = embed_each(client, args, paraphrase_texts, output_dir / "raw_para")
     similarities = key_set.drift_similarities(paraphrase_vectors, owners, keys)
-    threshold = key_set.threshold_keeping(similarities, args.para_keep_frac)
+    threshold = drift_threshold(similarities, args)
     paraphrase_stats = key_set.write_paraphrase_keys(
         output_dir, paraphrase_vectors, owners, similarities, threshold, len(sessions)
     )
@@ -79,6 +79,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=256, help="inputs per API request")
     parser.add_argument("--workers", type=int, default=6)
     return parser.parse_args()
+
+
+def drift_threshold(similarities: np.ndarray, args: argparse.Namespace) -> float:
+    """The added datasets use the threshold of AgentNet's key set from the same embedder."""
+    if not paths.ON_ADDED_SET:
+        return key_set.threshold_keeping(similarities, args.para_keep_frac)
+    agentnet_meta = json.loads((paths.AGENTNET_DATA / Path(args.output_dir).name / "meta.json").read_text())
+    if agentnet_meta["model"] != args.model:
+        raise SystemExit(f"AgentNet's key set was embedded with {agentnet_meta['model']}, not {args.model}")
+    return agentnet_meta["theta_para"]
 
 
 def embed_each(client, args: argparse.Namespace, texts: list[str], cache_prefix: Path) -> tuple[np.ndarray, int]:

@@ -49,6 +49,8 @@ def main() -> None:
     frames = all_frames(load_sessions())
     encoder = ScreenEncoder(args)
     if args.mode == "pca_fit":
+        if paths.ON_ADDED_SET:
+            raise SystemExit("the PCA basis is fitted on AgentNet only")
         fit_pca(encoder, frames, args)
     else:
         write_shard(encoder, frames, args, output_dir)
@@ -77,7 +79,8 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def pca_path(grid: int, pca_dim: int) -> Path:
-    return paths.BULK / f"dense_pca_g{grid}_d{pca_dim}.npz"
+    """The basis fitted on AgentNet's training frames; the added datasets are projected with it too."""
+    return paths.AGENTNET_BULK / f"dense_pca_g{grid}_d{pca_dim}.npz"
 
 
 def all_frames(sessions: list[dict]) -> list[Frame]:
@@ -91,7 +94,7 @@ def all_frames(sessions: list[dict]) -> list[Frame]:
 
 # ------------------------------------------------------------------------------------------------- encoding
 class FrameDataset(torch.utils.data.Dataset):
-    """Screenshots read from the AgentNet archives in place, preprocessed for SigLIP2 NaFlex."""
+    """Screenshots read from the image archives in place, preprocessed for SigLIP2 NaFlex."""
 
     def __init__(self, frames: list[Frame], encoder: str, max_patches: int):
         self.frames, self.encoder, self.max_patches = frames, encoder, max_patches
@@ -101,7 +104,8 @@ class FrameDataset(torch.utils.data.Dataset):
         from transformers import AutoImageProcessor
 
         self.processor = AutoImageProcessor.from_pretrained(self.encoder)
-        self.archives = {source: SplitZip(zip_path) for source, zip_path in paths.ZIPS.items()}
+        sources = {frame.source for frame in self.frames}
+        self.archives = {source: SplitZip(paths.ZIPS[source]) for source in sources}
         self.member_paths = {source: archive.basename_index() for source, archive in self.archives.items()}
 
     def __len__(self) -> int:

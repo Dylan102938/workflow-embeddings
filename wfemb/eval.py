@@ -15,7 +15,7 @@ import torch
 
 from . import metrics
 from .config import DataConfig, EvalConfig, Experiment, default_results_root
-from .data import TrainingCandidates, WorkflowDataset, eval_batches
+from .data import TrainingCandidates, WorkflowDataset, eval_batches, evaluation_candidates
 from .storage.results import to_json
 
 SCORING_CHUNK = 64  # sessions scored at once: logits are [chunk, T, N]
@@ -70,7 +70,7 @@ def evaluate(
     device,
     embeddings_path: Path | None = None,
 ) -> dict:
-    """All metrics of one split, named <split>_<metric>. The candidates are the training keys plus the split's."""
+    """All metrics of one split, named <split>_<metric>. candidates: AgentNet's training keys; the split's are added."""
     session_indices = dataset.sessions_in(split)
     n_sessions = len(session_indices)
     lengths = dataset.lengths[session_indices].astype(np.int64)
@@ -146,7 +146,7 @@ def main(
     torch.backends.cuda.matmul.allow_tf32 = True
     run_dir = Path(results_root or default_results_root()) / experiment.relative_dir
     dataset = WorkflowDataset(data, experiment)
-    candidates = TrainingCandidates(dataset, device)
+    candidates = evaluation_candidates(dataset, TrainingCandidates(dataset, device))
     model, saved = load_checkpoint(run_dir / checkpoint, torch.from_numpy(dataset.text_embeddings), device)
 
     started = time.time()

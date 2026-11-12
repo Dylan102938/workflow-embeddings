@@ -22,7 +22,7 @@ from wfemb.config import (
 
 BEST = (
     "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2"
-    "_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0"
+    "_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_data-agentnet_seed-0"
 )
 SMALL = dict(d_model=64, d_head=16, n_heads=4, n_layers=2, n_patches=16, batch_size=16, n_epochs=2, learning_rate=1e-3)
 

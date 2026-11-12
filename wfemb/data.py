@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .config import DataConfig, Experiment, TrainConfig
+from .config import ADDED, AGENTNET, DataConfig, Experiment, TrainConfig
 from .storage.frames import FrameStore, as_bfloat16, load_numpy, pinned_buffer_pool, read_file
 
 # Batch field -> (array in prepared/events.npz, dtype in a batch)
@@ -46,43 +46,109 @@ class Batch:
         )
 
 
+@dataclass
+class PreparedSet:
+    """What one data root holds in memory: sessions, their events, label keys and typed-text vectors."""
+
+    sessions: list[dict]
+    events: dict[str, np.ndarray]
+    label_keys: np.ndarray  # [S, D]
+    paraphrase_keys: np.ndarray  # [M, D]
+    paraphrase_offsets: np.ndarray  # [S] first row of each session's paraphrase keys
+    paraphrase_counts: np.ndarray  # [S]
+    text_embeddings: np.ndarray  # [n_texts, D_text]
+
+    @property
+    def n_steps(self) -> int:
+        return len(self.events["ev_type"])
+
+
+def read_prepared_set(root: Path, label_set: str) -> PreparedSet:
+    sessions = pickle.load(read_file(root / "prepared" / "sessions.pkl"))
+    events = load_numpy(root / "prepared" / "events.npz")
+    labels_dir = root / label_set
+    label_keys = load_numpy(labels_dir / "keys.npy").astype(np.float32)
+    if (labels_dir / "para_keys.npy").exists():
+        paraphrase_keys = load_numpy(labels_dir / "para_keys.npy").astype(np.float32)
+        index = load_numpy(labels_dir / "para_index.npz")
+        paraphrase_offsets, paraphrase_counts = index["offset"], index["count"]
+    else:
+        paraphrase_keys = np.zeros((0, label_keys.shape[1]), np.float32)
+        paraphrase_offsets = np.zeros(len(sessions), np.int64)
+        paraphrase_counts = np.zeros(len(sessions), np.int64)
+    return PreparedSet(
+        sessions=sessions,
+        events={name: events[name] for name in events.files},
+        label_keys=label_keys,
+        paraphrase_keys=paraphrase_keys,
+        paraphrase_offsets=paraphrase_offsets,
+        paraphrase_counts=paraphrase_counts,
+        text_embeddings=load_numpy(labels_dir / "text_vecs.npy"),
+    )
+
+
+def stack(first: PreparedSet, second: PreparedSet) -> PreparedSet:
+    """second's sessions after first's: its step, typed-text and paraphrase rows are numbered on from first's."""
+    events = {name: np.concatenate([first.events[name], second.events[name]]) for name in first.events}
+    n_sessions, n_texts = len(first.sessions), len(first.text_embeddings)
+    events["sess_offset"][n_sessions:] += first.n_steps
+    added_texts = events["ev_text"][first.n_steps :]
+    added_texts[added_texts >= 0] += n_texts
+    return PreparedSet(
+        sessions=first.sessions + second.sessions,
+        events=events,
+        label_keys=np.concatenate([first.label_keys, second.label_keys]),
+        paraphrase_keys=np.concatenate([first.paraphrase_keys, second.paraphrase_keys]),
+        paraphrase_offsets=np.concatenate(
+            [first.paraphrase_offsets, second.paraphrase_offsets + len(first.paraphrase_keys)]
+        ),
+        paraphrase_counts=np.concatenate([first.paraphrase_counts, second.paraphrase_counts]),
+        text_embeddings=np.concatenate([first.text_embeddings, second.text_embeddings]),
+    )
+
+
 class WorkflowDataset:
     """Every session's metadata, events and frozen label keys in memory; screen features read per batch.
 
     Session s owns steps step_offsets[s] .. step_offsets[s] + lengths[s] - 1 of the event arrays and frame cache.
+    AgentNet's sessions come first; the added datasets' follow when the experiment trains on any of them.
     """
 
     def __init__(self, config: DataConfig, experiment: Experiment):
         root = Path(config.root)
-        self.sessions = pickle.load(read_file(root / "prepared" / "sessions.pkl"))
-        events = load_numpy(root / "prepared" / "events.npz")
-        self.events = {name: events[name] for name in events.files}
+        prepared = read_prepared_set(root, config.label_set)
+        frame_caches = [(config.frame_cache_dir(experiment), 0)]
+        if experiment.trains_on_added_data:
+            frame_caches.append((config.added_frame_cache_dir(experiment), prepared.n_steps))
+            prepared = stack(prepared, read_prepared_set(root / ADDED, config.label_set))
+
+        self.sessions, self.events = prepared.sessions, prepared.events
         self.step_offsets, self.lengths = self.events["sess_offset"], self.events["sess_len"]
         self.max_events = int(self.events["ev_type"].shape[1])
         self.n_key_tokens = len(json.load(open(root / "prepared" / "vocab.json"))["key_vocab"])
-
-        labels_dir = root / config.label_set
-        self.label_keys = load_numpy(labels_dir / "keys.npy").astype(np.float32)
-        self.text_embeddings = load_numpy(labels_dir / "text_vecs.npy")
-        if (labels_dir / "para_keys.npy").exists():
-            self.paraphrase_keys = load_numpy(labels_dir / "para_keys.npy").astype(np.float32)
-            index = load_numpy(labels_dir / "para_index.npz")
-            self.paraphrase_offsets, self.paraphrase_counts = index["offset"], index["count"]
-        else:
+        self.label_keys, self.text_embeddings = prepared.label_keys, prepared.text_embeddings
+        self.paraphrase_keys = prepared.paraphrase_keys
+        if not len(self.paraphrase_keys):
             self.paraphrase_keys = np.zeros((1, self.label_keys.shape[1]), np.float32)
-            self.paraphrase_offsets = np.zeros(len(self.sessions), np.int64)
-            self.paraphrase_counts = np.zeros(len(self.sessions), np.int64)
+        self.paraphrase_offsets, self.paraphrase_counts = prepared.paraphrase_offsets, prepared.paraphrase_counts
 
-        self.splits = np.array([session["split"] for session in self.sessions])
+        self.datasets = np.array([session.get("dataset", AGENTNET) for session in self.sessions])
+        splits = np.array([session["split"] for session in self.sessions])
+        in_training_data = np.isin(self.datasets, experiment.training_datasets)
+        self.splits = np.where((splits == "train") & ~in_training_data, "unused", splits)
         group_ids = {name: index for index, name in enumerate(sorted({s["group"] for s in self.sessions}))}
         self.groups = np.array([group_ids[session["group"]] for session in self.sessions])
 
-        cache_dir = config.frame_cache_dir(experiment)
-        self.frames = FrameStore(cache_dir)
+        self.frames = FrameStore(frame_caches)
         if self.frames.n_patches != experiment.n_patches:
-            raise ValueError(f"{cache_dir} has {self.frames.n_patches} patches per frame, not {experiment.n_patches}")
-        if self.frames.n_steps != int(self.step_offsets[-1] + self.lengths[-1]):
-            raise ValueError(f"{cache_dir} does not match prepared/events.npz")
+            raise ValueError(
+                f"{frame_caches[0][0]} has {self.frames.n_patches} patches per frame, not {experiment.n_patches}"
+            )
+        if self.frames.n_steps != prepared.n_steps:
+            raise ValueError(f"the frame caches {frame_caches} do not match the prepared events")
+
+    def agentnet_training_sessions(self) -> np.ndarray:
+        return np.nonzero((self.splits == "train") & (self.datasets == AGENTNET))[0]
 
     def sessions_in(self, split: str) -> np.ndarray:
         return np.nonzero(self.splits == split)[0]
@@ -147,11 +213,14 @@ class WorkflowDataset:
 
 
 class TrainingCandidates:
-    """The candidates of every training step: the instruction keys of all N training sessions, on the device."""
+    """The candidates of every step: the instruction keys of N training sessions, on the device.
 
-    def __init__(self, dataset: WorkflowDataset, device):
+    session_indices: the training sessions of the run (the default), or of AgentNet alone for evaluation.
+    """
+
+    def __init__(self, dataset: WorkflowDataset, device, session_indices: np.ndarray | None = None):
         self.device = device
-        self.session_indices = dataset.sessions_in("train")
+        self.session_indices = dataset.sessions_in("train") if session_indices is None else session_indices
         self.keys = torch.from_numpy(dataset.label_keys[self.session_indices]).to(device)
         self.groups = torch.from_numpy(dataset.groups[self.session_indices]).to(device)
         self._column_of_session = np.full(len(dataset.sessions), -1, np.int64)
@@ -177,6 +246,14 @@ class TrainingCandidates:
         choice = (torch.rand(len(self), device=self.device) * n_wordings.float()).long()
         paraphrase = self._paraphrase_keys[(self._paraphrase_offsets + choice - 1).clamp(min=0)]
         return torch.where((choice > 0)[:, None], paraphrase, self.keys)
+
+
+def evaluation_candidates(dataset: WorkflowDataset, training: TrainingCandidates) -> TrainingCandidates:
+    """AgentNet's training sessions, whatever the run trains on, so that metrics compare across runs."""
+    agentnet_sessions = dataset.agentnet_training_sessions()
+    if np.array_equal(agentnet_sessions, training.session_indices):
+        return training
+    return TrainingCandidates(dataset, training.device, agentnet_sessions)
 
 
 def length_bucketed_batches(

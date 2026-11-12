@@ -5,7 +5,8 @@ How the code under `wfemb/` works and why. Variables, run ids, metric definition
 
 ## The task
 
-A session is one recorded computer-use workflow from AgentNet: a task instruction and T steps. Each step is the
+A session is one recorded computer-use workflow: a task instruction and T steps. Sessions come from AgentNet and,
+as extra training data, from the datasets added to it ([DATA_PREP.md](DATA_PREP.md#added-datasets)). Each step is the
 screenshot the user saw and the input events they performed on it; the last step is the final screen, without events.
 The model reads a session step by step and, at every step, outputs
 
@@ -25,6 +26,10 @@ instructions are embedded once with OpenAI text-embedding-3-large (their *keys*,
 
 Sessions with the same normalized instruction form a *group*; a group never spans two splits.
 
+The splits are AgentNet's. The added datasets are training data only and a second prepared set on disk; a run whose
+`data` variable names any of them loads both sets as one (`stack`): the added sessions follow AgentNet's, and the
+training sessions of datasets the run does not name are left unused.
+
 **Inputs per step**, all frozen and precomputed:
 
 - *screen tokens* `[n_patches, 512]`: SigLIP2 so400m patch features of the screenshot, pooled to a 16x16, 24x24 or
@@ -39,10 +44,11 @@ buckets of 50 batches so a batch pads little, and cut into batches of `batch_siz
 epoch has slightly more optimizer steps than sessions / batch_size. Each step but a session's last is dropped with
 probability `step_dropout`. Evaluation batches (`eval_batches`) visit every session of a split once, nothing dropped.
 
-**Candidates.** In training, every step is scored against the keys of all N training instructions
+**Candidates.** In training, every step is scored against the keys of all N training instructions of the run
 (`TrainingCandidates`). Each step, every candidate is shown with a random wording: the instruction's key or the key of
 one of its paraphrases, so wording style cannot separate the target from the negatives. In evaluation the candidates
-are the training keys plus the evaluated split's keys; val and test instructions never occur in training.
+are AgentNet's training keys plus the evaluated split's keys, whatever the run trained on (`evaluation_candidates`):
+more training data must not make the evaluation harder. Val and test instructions never occur in training.
 
 ## Model (`wfemb/model/`)
 

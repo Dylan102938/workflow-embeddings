@@ -13,6 +13,8 @@ from pathlib import Path
 
 import chz
 
+from .storage.paths import ADDED, ADDED_DATASETS, AGENTNET
+
 REPO = Path(__file__).resolve().parent.parent
 ARCHITECTURES = ("transf", "late-history-transf", "gru")
 
@@ -31,6 +33,7 @@ ID_KEYS = {
     "ep": "n_epochs",
     "beta": "hard_negative_beta",
     "pca": "pca_dim",
+    "data": "training_data",
     "seed": "seed",
 }
 
@@ -52,6 +55,7 @@ class Experiment:
     n_epochs: int = 45
     hard_negative_beta: float = 0.0
     pca_dim: int = 512  # channels the screen features are PCA-projected to; 0 = unprojected
+    training_data: str = AGENTNET  # datasets trained on, joined by "+"; "all" = AgentNet and every added dataset
     seed: int = 0
 
     @chz.validate
@@ -64,6 +68,12 @@ class Experiment:
             raise ValueError(f"n_patches must be a square number (256, 576, ...), got {self.n_patches}")
         if self.pca_dim < 0:
             raise ValueError(f"pca_dim must be 0 (unprojected) or a channel count, got {self.pca_dim}")
+        unknown = set(self.training_datasets) - {AGENTNET, *ADDED_DATASETS}
+        if unknown or self.training_datasets[0] != AGENTNET:
+            raise ValueError(
+                f'training_data must be "all" or agentnet[+<dataset>...] with datasets from {ADDED_DATASETS}, '
+                f"got {self.training_data!r}"
+            )
 
     @property
     def id(self) -> str:
@@ -86,6 +96,16 @@ class Experiment:
             field = ID_KEYS[key]
             values[field] = type(getattr(defaults, field))(text)
         return cls(**values)
+
+    @property
+    def training_datasets(self) -> tuple[str, ...]:
+        if self.training_data == "all":
+            return (AGENTNET, *ADDED_DATASETS)
+        return tuple(self.training_data.split("+"))
+
+    @property
+    def trains_on_added_data(self) -> bool:
+        return len(self.training_datasets) > 1
 
     @property
     def patch_grid_size(self) -> int:
@@ -165,6 +185,9 @@ class DataConfig:
     def frame_cache_dir(self, experiment: Experiment) -> Path:
         return Path(self.frame_cache) if self.frame_cache else Path(self.bulk_root) / experiment.frame_cache_name
 
+    def added_frame_cache_dir(self, experiment: Experiment) -> Path:
+        return Path(self.bulk_root) / ADDED / experiment.frame_cache_name
+
 
 def default_results_root() -> str:
     return os.environ.get("WFEMB_RESULTS", str(REPO / "results"))
@@ -207,6 +230,8 @@ def main():
     print(config.experiment.id)
     print("results:", config.run_dir)
     print("frames: ", config.data.frame_cache_dir(config.experiment))
+    if config.experiment.trains_on_added_data:
+        print("added frames: ", config.data.added_frame_cache_dir(config.experiment))
 
 
 if __name__ == "__main__":

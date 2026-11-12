@@ -23,6 +23,7 @@ A run is defined by these variables only (`config.Experiment`). Each has a short
 | `ep` | `n_epochs` | `45` | passes over the training sessions |
 | `beta` | `hard_negative_beta` | `0` | strength of hard-negative weighting (0 = off) |
 | `pca` | `pca_dim` | `512` | channels the 1152-channel SigLIP2 screen features are PCA-projected to; 0 = no projection (added 2026-11-11, under test) |
+| `data` | `training_data` | `agentnet` | datasets trained on, joined by `+` (`agentnet+videocua`, ...); `all` = AgentNet and every added dataset ([DATA_PREP.md](DATA_PREP.md#added-datasets)). Validation and test are always AgentNet's (added 2026-11-11, under test) |
 | `seed` | `seed` | `0` | seed of initialization, batch order, dropout and paraphrase draws |
 
 Everything else is the fixed recipe, shared by all runs: `TrainConfig`, `EvalConfig` and `DataConfig` in
@@ -51,10 +52,15 @@ Adding a variable (to ablate a recipe setting): add the field to `Experiment` an
 with the default that reproduces earlier runs; document it here; move existing result folders with
 `python -m wfemb.storage.results migrate`. A variable whose alternatives are no better than the best model is removed
 again, together with its code and the results that used it. Removed so far: turning the near-duplicate mask off, and
-separate Q/K/V projections per token type. Added after the original thirteen: `pca`.
+separate Q/K/V projections per token type. Added after the original thirteen: `pca`, `data`.
 
 `patch` and `pca` choose the frame cache, `frames_dense[_g<grid>][_raw]` (`Experiment.frame_cache_name`); a new
-combination needs its cache built first ([DATA_PREP.md](DATA_PREP.md)).
+combination needs its cache built first ([DATA_PREP.md](DATA_PREP.md)). A run with added datasets also needs that
+cache for the added set (`BULK/added/`).
+
+`data` changes the training sessions and the training candidates only. `ep` counts passes over the run's own
+training sessions, so a run with more data takes more optimizer steps. Evaluation always scores against AgentNet's
+training instructions plus the evaluated split's, so `val_*` and `test_*` metrics compare across `data` values.
 
 ## Command line
 
@@ -68,14 +74,14 @@ python -m wfemb.config id=<run id>                                     # canonic
 
 ## Run ids
 
-`arch-<v>_dm-<v>_dh-<v>_nl-<v>_nh-<v>_drop-<v>_smooth-<v>_patch-<v>_lr-<v>_bs-<v>_ep-<v>_beta-<v>_pca-<v>_seed-<v>`
+`arch-<v>_dm-<v>_dh-<v>_nl-<v>_nh-<v>_drop-<v>_smooth-<v>_patch-<v>_lr-<v>_bs-<v>_ep-<v>_beta-<v>_pca-<v>_data-<v>_seed-<v>`
 
 Values never contain `_`; a key is everything before the first `-` of a segment. Numbers are canonical: integers as
 integers (`beta-0`, `beta-2`), floats below 0.01 in short scientific form (`lr-5e-4`, `lr-1.5e-3`), other floats with
 `%g` (`drop-0.3`). `wfemb.config.Experiment.id` / `Experiment.from_id` round-trip exactly; an id written before a variable was added
 is read with that variable's default. The best model so far is
 
-`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_seed-0`
+`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_pca-512_data-agentnet_seed-0`
 
 Results are always reported and named with these ids.
 
@@ -83,7 +89,7 @@ Results are always reported and named with these ids.
 
 Every run writes raw data only (no summaries; the dashboard computes those) to
 `<results root>/<one folder per id segment>/`, e.g.
-`results/arch-late-history-transf/dm-512/dh-64/nl-4/nh-8/drop-0.3/smooth-0.2/patch-576/lr-5e-4/bs-64/ep-45/beta-0/pca-512/seed-0/`:
+`results/arch-late-history-transf/dm-512/dh-64/nl-4/nh-8/drop-0.3/smooth-0.2/patch-576/lr-5e-4/bs-64/ep-45/beta-0/pca-512/data-agentnet/seed-0/`:
 
 | file | kind | content |
 |---|---|---|

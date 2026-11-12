@@ -23,7 +23,7 @@ import torch
 
 from . import metrics
 from .config import Experiment, RunConfig, TrainConfig, parse_run_config
-from .data import Batch, TrainingCandidates, WorkflowDataset, train_batches
+from .data import Batch, TrainingCandidates, WorkflowDataset, evaluation_candidates, train_batches
 from .eval import evaluate, format_metrics
 from .model import ModelConfig, build_model, model_config
 from .storage.results import RunWriter, to_json
@@ -208,16 +208,16 @@ def save_checkpoint(path: Path, state: TrainState, model_cfg: ModelConfig, exper
 
 
 def final_evaluation(
-    config: RunConfig, state: TrainState, dataset: WorkflowDataset, candidates: TrainingCandidates, device
+    config: RunConfig, state: TrainState, dataset: WorkflowDataset, evaluation: TrainingCandidates, device
 ) -> dict:
     """Validation and test metrics of the checkpoint with the lowest validation loss."""
     run_dir = config.run_dir
     best = torch.load(run_dir / "best.pt", map_location=device, weights_only=False)
     state.ema_model.load_state_dict(best["model"])
     final = {"best_step": best["step"], "selected_on": "val_loss"}
-    final.update(evaluate(state.ema_model, dataset, "val", candidates, config.eval, device))
+    final.update(evaluate(state.ema_model, dataset, "val", evaluation, config.eval, device))
     embeddings_path = run_dir / "test_embeddings.npz" if config.eval.save_test_embeddings else None
-    final.update(evaluate(state.ema_model, dataset, "test", candidates, config.eval, device, embeddings_path))
+    final.update(evaluate(state.ema_model, dataset, "test", evaluation, config.eval, device, embeddings_path))
     return final
 
 
@@ -232,6 +232,7 @@ def training_loop(config: RunConfig) -> dict | None:
     started = time.time()
     dataset = WorkflowDataset(config.data, experiment)
     candidates = TrainingCandidates(dataset, device)
+    evaluation = evaluation_candidates(dataset, candidates)
     model_cfg = model_config(experiment, train, dataset)
     state = make_state(config, model_cfg, dataset, len(candidates), device)
 
@@ -270,7 +271,7 @@ def training_loop(config: RunConfig) -> dict | None:
                 restart_stall_watchdog()
 
             if state.step % config.eval.eval_steps == 0 or state.step == state.total_steps:
-                val_metrics = evaluate(state.ema_model, dataset, "val", candidates, config.eval, device)
+                val_metrics = evaluate(state.ema_model, dataset, "val", evaluation, config.eval, device)
                 max_memory = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else None
                 row = {
                     "step": state.step,
@@ -288,7 +289,7 @@ def training_loop(config: RunConfig) -> dict | None:
         batches.close()  # gives the prefetcher's in-flight buffers back to the pool
         state.epoch += 1
 
-    final = final_evaluation(config, state, dataset, candidates, device)
+    final = final_evaluation(config, state, dataset, evaluation, device)
     final["train_minutes"] = round((time.time() - started) / 60, 2)
     writer.write_final(final)
     writer.close()

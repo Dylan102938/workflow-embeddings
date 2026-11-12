@@ -73,19 +73,22 @@ class NpyRows:
 class FrameStore:
     """Screen tokens of every step, [n_steps, n_patches, dim] as bfloat16 bits, addressed by global step index.
 
-    The cache folder holds shards: global_<tag>.npy and meta_<tag>.json with the shard's step range [lo, hi).
+    A cache folder holds shards: global_<tag>.npy and meta_<tag>.json with the shard's step range [lo, hi).
+    caches: (folder, global index of the folder's first step) pairs.
     """
 
-    def __init__(self, cache_dir: Path):
-        cache_dir = Path(cache_dir)
-        meta_paths = sorted(glob.glob(str(cache_dir / "meta_*.json")))
-        if not meta_paths:
-            raise FileNotFoundError(f"no frame cache in {cache_dir}")
+    def __init__(self, caches: list[tuple[Path, int]]):
         shards = []
-        for meta_path in meta_paths:
-            meta = json.load(open(meta_path))
-            tag = Path(meta_path).stem.split("_", 1)[1]
-            shards.append((meta["lo"], meta["hi"], NpyRows(cache_dir / f"global_{tag}.npy")))
+        for cache_dir, first_step in caches:
+            cache_dir = Path(cache_dir)
+            meta_paths = sorted(glob.glob(str(cache_dir / "meta_*.json")))
+            if not meta_paths:
+                raise FileNotFoundError(f"no frame cache in {cache_dir}")
+            for meta_path in meta_paths:
+                meta = json.load(open(meta_path))
+                tag = Path(meta_path).stem.split("_", 1)[1]
+                rows = NpyRows(cache_dir / f"global_{tag}.npy")
+                shards.append((first_step + meta["lo"], first_step + meta["hi"], rows))
         self.shards = sorted(shards, key=lambda shard: shard[0])
         self.shard_ends = np.array([end for _, end, _ in self.shards])
         self.n_steps = int(self.shard_ends.max())

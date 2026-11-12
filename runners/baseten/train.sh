@@ -15,11 +15,16 @@ t0=$(date +%s)
 cp -r "$TEAM"/data/{prepared,keys,keys_openai} "$WFEMB_DATA/"
 mapfile -t RUNS < <(python -m wfemb.storage.jobs runs "$SECTION")
 (( ${#RUNS[@]} )) || { echo "no runs in section [$SECTION]"; exit 1; }
-for n in $(for l in "${RUNS[@]}"; do python -m wfemb.config "id=${l%% *}" | sed -n 's#^frames: *.*/##p'; done | sort -u); do
-    mkdir -p "$WFEMB_BULK/$n"                                  # the frame caches the runs need, to local NVMe
-    for f in "$TEAM/bulk/$n"/*; do cp "$f" "$WFEMB_BULK/$n/" & done; wait
-    for f in "$WFEMB_BULK/$n"/*.npy; do cat "$f" > /dev/null & done; wait          # into the page cache
-done
+stage_frames() {                                               # a frame cache of the team cache, to local NVMe
+    mkdir -p "$WFEMB_BULK/$1"
+    for f in "$TEAM/bulk/$1"/*; do cp "$f" "$WFEMB_BULK/$1/" & done; wait
+    for f in "$WFEMB_BULK/$1"/*.npy; do cat "$f" > /dev/null & done; wait          # into the page cache
+}
+CACHES=$(for l in "${RUNS[@]}"; do python -m wfemb.config "id=${l%% *}" | sed -n 's#^\(added \)\?frames: *.*/bulk/##p'; done | sort -u)
+if grep -q "^added/" <<< "$CACHES"; then                       # some run trains on the added datasets
+    mkdir -p "$WFEMB_DATA/added"; cp -r "$TEAM"/data/added/{prepared,keys,keys_openai} "$WFEMB_DATA/added/"
+fi
+for n in $CACHES; do stage_frames "$n"; done
 echo "data staged in $(( $(date +%s) - t0 ))s: $(du -sh "$WFEMB_BULK" | cut -f1) frames; mem $(free -g | awk '/Mem/{print $2"G total, "$7"G avail"}')"
 NG=$(nvidia-smi -L | wc -l); pids=(); tails=()
 for i in "${!RUNS[@]}"; do

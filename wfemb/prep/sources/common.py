@@ -10,12 +10,13 @@ import hashlib
 import io
 import json
 import re
+import subprocess
 import tarfile
 import time
 import zipfile
 from multiprocessing.pool import Pool
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 from PIL import Image
@@ -26,56 +27,20 @@ Image.MAX_IMAGE_PIXELS = None
 STATS_BATCH = 64
 DOWNLOAD_ATTEMPTS = 120
 
+# fmt: off
 KEY_ALIASES = {
-    "control": "ctrl",
-    "command": "cmd",
-    "⌘": "cmd",
-    "option": "alt",
-    "windows": "win",
-    "super": "win",
-    "meta": "win",
-    "return": "enter",
-    "escape": "esc",
-    "del": "delete",
-    "spacebar": "space",
-    "space bar": "space",
-    "comma": ",",
-    "period": ".",
-    "plus": "+",
-    "minus": "-",
-    "page up": "pageup",
-    "page down": "pagedown",
-    "pgup": "pageup",
-    "pgdn": "pagedown",
-    "caps lock": "capslock",
-    "prt sc": "print_screen",
-    "prtsc": "print_screen",
-    "caps_lock": "capslock",
-    "print screen": "print_screen",
-    "printscreen": "print_screen",
+    "control": "ctrl", "command": "cmd", "⌘": "cmd", "option": "alt", "windows": "win", "super": "win", "meta": "win",
+    "return": "enter", "escape": "esc", "del": "delete", "spacebar": "space", "space bar": "space", "comma": ",",
+    "period": ".", "plus": "+", "minus": "-", "page up": "pageup", "page down": "pagedown", "pgup": "pageup",
+    "pgdn": "pagedown", "caps lock": "capslock", "caps_lock": "capslock", "prt sc": "print_screen",
+    "prtsc": "print_screen", "print screen": "print_screen", "printscreen": "print_screen",
 }
 MODIFIERS = {"ctrl", "alt", "shift", "cmd", "win", "fn"}
 NAMED_KEYS = MODIFIERS | {
-    "enter",
-    "esc",
-    "tab",
-    "space",
-    "backspace",
-    "delete",
-    "insert",
-    "home",
-    "end",
-    "pageup",
-    "pagedown",
-    "up",
-    "down",
-    "left",
-    "right",
-    "capslock",
-    "print_screen",
-    "num_lock",
-    *(f"f{number}" for number in range(1, 25)),
+    "enter", "esc", "tab", "space", "backspace", "delete", "insert", "home", "end", "pageup", "pagedown", "up", "down",
+    "left", "right", "capslock", "print_screen", "num_lock", *(f"f{number}" for number in range(1, 25)),
 }
+# fmt: on
 
 
 def download(repository: str, patterns: list[str], directory: Path) -> None:
@@ -189,30 +154,9 @@ def unit(value: float, extent: float) -> float:
     return round(min(max(value / extent, 0.0), 1.0), 4)
 
 
-# ------------------------------------------------------------------------------------------ split tar archives
-class JoinedParts:
-    """The parts of a split archive as one readable stream."""
-
-    def __init__(self, parts: list[Path]):
-        self._parts = iter(parts)
-        self._current: BinaryIO | None = None
-
-    def read(self, size: int = -1) -> bytes:
-        while True:
-            if self._current is None:
-                part = next(self._parts, None)
-                if part is None:
-                    return b""
-                self._current = open(part, "rb")
-            data = self._current.read(size)
-            if data:
-                return data
-            self._current.close()
-            self._current = None
-
-
 def copy_images(parts: list[Path], wanted: dict[str, str], writer: SourceWriter, pool: Pool) -> int:
-    """Copies the wanted members (archive path -> image name) into the writer; returns how many were found."""
+    """Copies the wanted members (archive path -> image name) of a tar archive, which may be split into parts, into
+    the writer; returns how many were found."""
     found = 0
     batch: list[tuple[str, bytes]] = []
 
@@ -221,7 +165,8 @@ def copy_images(parts: list[Path], wanted: dict[str, str], writer: SourceWriter,
             writer.add_image(ConvertedImage(name, data, stats))
         batch.clear()
 
-    with tarfile.open(fileobj=JoinedParts(parts), mode="r|gz") as archive:
+    joined_parts = subprocess.Popen(["cat", *map(str, parts)], stdout=subprocess.PIPE)
+    with tarfile.open(fileobj=joined_parts.stdout, mode="r|gz") as archive:
         for member in archive:
             name = wanted.get(member.name)
             if name is None or not member.isfile():
@@ -232,5 +177,6 @@ def copy_images(parts: list[Path], wanted: dict[str, str], writer: SourceWriter,
                 flush()
             if found == len(wanted):
                 break
+    joined_parts.kill()
     flush()
     return found

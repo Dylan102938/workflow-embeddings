@@ -1,6 +1,6 @@
 """Converters from other datasets to AgentNet's record format.
 
-  python -m wfemb.prep.sources <dataset> [--raw DIR] [--workers N]
+  python -m wfemb.prep.sources <dataset> [--download] [--raw DIR] [--workers N]
 
-Each writes DATA/sources/<dataset>/; wfemb.prep.extend then cleans the sessions and appends them to the prepared set.
+Each writes DATA/added/sources/<dataset>/; wfemb.prep.add_datasets then cleans the sessions and prepares them.
 """

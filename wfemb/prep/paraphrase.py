@@ -1,7 +1,6 @@
 """Paraphrases every unique instruction with a local instruction-tuned LLM (vLLM); writes keys/paraphrases.json.
 
   python -m wfemb.prep.paraphrase [--model Qwen/Qwen2.5-7B-Instruct] [--n 6] [--temperature 0.9] [--limit N] [--tp 1]
-  python -m wfemb.prep.paraphrase --reparse
 
 Runs in its own environment (runners/slurm/paraphrase.sbatch): vLLM pins its own torch, so this module and what
 it imports may only need the standard library, numpy and vllm.
@@ -39,9 +38,6 @@ def load_paraphrases() -> dict[str, list[str]]:
 
 def main() -> None:
     args = parse_arguments()
-    if args.reparse:
-        reparse()
-        return
     from vllm import LLM, SamplingParams
 
     instructions = sorted({session["instruction"] for session in load_sessions()})
@@ -83,20 +79,6 @@ def main() -> None:
             print("  -", rewrite)
 
 
-def reparse() -> None:
-    """Parses the stored replies again (after a change to parse_paraphrases), without running the LLM."""
-    with open(PARAPHRASES_PATH) as f:
-        stored = json.load(f)
-    stored["paraphrases"] = {
-        instruction: distinct_paraphrases(reply, instruction, stored["n"])
-        for instruction, reply in stored["raw"].items()
-    }
-    with open(PARAPHRASES_PATH, "w") as f:
-        json.dump(stored, f)
-    counts = [len(rewrites) for rewrites in stored["paraphrases"].values()]
-    print(f"{len(counts)} instructions; {sum(count == 0 for count in counts)} without a paraphrase")
-
-
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
@@ -104,7 +86,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.9)
     parser.add_argument("--limit", type=int, default=0, help="only the first N instructions")
     parser.add_argument("--tp", dest="tensor_parallel_size", type=int, default=1)
-    parser.add_argument("--reparse", action="store_true", help="parse the stored replies again; no LLM")
     return parser.parse_args()
 
 

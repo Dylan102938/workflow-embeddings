@@ -59,7 +59,6 @@ for spec in $SPECS; do
         echo "$spec: shards $w-$(( w + NG - 1 )) of $NSH done at $(( $(date +%s) - t1 ))s; local disk $(du -sh "$BT_SCRATCH_DIR" | cut -f1)"
     done
     rm -rf "$TEAM_BULK/$name"; mv "$part" "$TEAM_BULK/$name"
-    python runners/baseten/cache_summary.py "$TEAM_BULK/$name"
     echo "$spec built in $(( $(date +%s) - t1 ))s: $(du -sh "$TEAM_BULK/$name" | cut -f1) in the team cache"
 done
 ls -la "$TEAM_BULK"; echo BUILD_DONE

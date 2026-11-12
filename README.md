@@ -24,7 +24,7 @@ wfemb/
   model/         transformer.py (workflow encoder), events.py (event tokens), gru.py (GRU final block)
   storage/       paths.py, frames.py (frame-cache reader), results.py (results tree), jobs.py (run queue), fetch.py
   prep/          one-time data preparation (sessions, actions, frame caches, text embeddings, keys, judged pools;
-                 sources/ + add_datasets.py + clean.py + validate.py: the datasets added to AgentNet)
+                 sources/ + add_datasets.py + clean.py + held_out.py: the datasets added to AgentNet)
   demo/          exports Intent Replay bundles for the dashboard
 dashboard/       local results dashboard (runs, curves, seed aggregation, ablations, job queue, demo viewer)
 jobs.txt         the run queue: run ids in named sections, one section per launch

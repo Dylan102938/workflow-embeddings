@@ -237,6 +237,86 @@ Not used: ScaleCUA's Android and iOS trajectories (phone screens), its trajector
 GUI-360's failed trajectories. ScaleCUA did not release the screenshots of its 2025-06-12 desktop batch, so those
 691 sessions cannot be used.
 
+### Rules for the test set
+
+The test split measures workflows in applications the model never trained on, and no validation or test
+instruction is seen in training. Added data must not weaken either. `wfemb/prep/held_out.py` holds the rules:
+`python -m wfemb.prep.held_out` prints each one with the number of sessions that break it and exits with 1 if any
+does. `add_datasets.py` runs the same check and writes nothing if it fails.
+
+What is held out:
+
+- **Test applications**: the 157 app keys that `prepare.py` sampled (`summary.json` `test_apps`).
+- **Held-out applications**: the test applications, and every other application that only validation or test
+  sessions use. Compared by name, without the key prefix, vendor words and suffixes (`Mozilla Thunderbird` =
+  `domain:thunderbird`, `QGIS` = `app:qgis desktop`): 369 names, 153 of them from the test applications.
+- **Evaluation instructions**: those of the validation and test sessions, ignoring case and whitespace.
+
+| Rule | Enforced by |
+|---|---|
+| AgentNet: every test session has a test application, or the instruction of a session that has one | `prepare.py` `assign_splits` |
+| AgentNet: no training or validation session has a test application | `assign_splits`: a session with any test app key goes to test |
+| AgentNet: no instruction is in two splits | `assign_splits`: validation takes whole instruction groups, and a group with a member in test moves to test |
+| Added: every session is training data | `add_datasets.py` writes `split: "train"`, so validation and test are AgentNet's 952 and 3,050 sessions in every run |
+| Added: no session has a held-out application | cleaning rule `held_out_application` |
+| Added: no instruction names a held-out application | cleaning rule `mentions_held_out_application` |
+| Added: no instruction is an evaluation instruction, or a near copy of one | cleaning rules `evaluation_instruction`, `near_evaluation_instruction` |
+
+Evaluation is the same for every run: the candidates are AgentNet's training keys plus the split's own, whatever
+the run trains on (`data.evaluation_candidates`).
+
+What the rules do not cover:
+
+- **AgentNet's own split compares app keys exactly.** 907 of its 18,081 training sessions have an application with
+  the name of a test application under another key: `app:discord` (117 sessions; `web:discord` is held out),
+  `app:intellij idea` (88; `app:intellij idea community edition`), `app:steam` (32; `web:steam`),
+  `app:mozilla thunderbird` and `app:thunderbird` (21; `domain:thunderbird`). Some are different products with one
+  name: `web:google maps` (262) and `web:google calendar` (182) against `app:maps` and `app:calendar`. The check
+  prints this number. Added data is held to the stricter comparison by name.
+- **A test session can also use applications that training has**: 1,353 of the 3,050 do. Test metrics are therefore
+  also reported for each group ([EXPERIMENTS.md](EXPERIMENTS.md)).
+- **A near copy is a near-verbatim one** (character 3-to-5-gram TF-IDF cosine of 0.9 or more). A reworded test
+  instruction is not detected.
+
+### Cleaning rules (`clean.py`)
+
+`add_datasets.py` goes through the datasets in the order given and through each dataset's sessions by id. A
+session is dropped by the first rule that is true for it, in the order of the three tables below, which are the
+three tables in `clean.py`. `summary.json` counts the dropped sessions per rule and `rejections.json` lists them.
+
+`HELD_OUT_RULES`: the session touches what the validation and test splits hold out (see above).
+
+| Rule | A session is dropped if |
+|---|---|
+| `held_out_application` | one of its applications or websites is a held-out application |
+| `mentions_held_out_application` | its instruction names a test application. Not checked for names of fewer than 4 letters, names that are ordinary words (`calendar`, `pages`), or inside mail addresses. Catches sessions whose application is not recorded |
+| `evaluation_instruction` | its instruction is an evaluation instruction |
+| `near_evaluation_instruction` | its instruction is a near copy of one |
+
+`QUALITY_RULES`: the recording is not a usable demonstration.
+
+| Rule | A session is dropped if | Why |
+|---|---|---|
+| `bad_instruction` | its instruction has fewer than 2 or more than 150 words, or no letters | no usable label |
+| `missing_screenshot` | a screenshot is missing or does not decode | |
+| `too_short`, `too_long` | it has fewer than 2 or more than 100 steps | AgentNet's range is 2 to 129 |
+| `portrait_screen` | a screenshot is more than 1.25 times as tall as wide | phone screens (VideoCUA has a few recordings of mobile apps) |
+| `few_input_actions` | fewer than half of its steps before the final screenshot have a pointer or keyboard event | mostly API actions or waiting |
+| `pointer_off_screen` | more than 30% of its positions lie exactly on the screen border | clipped positions: the coordinates did not belong to the screenshot |
+| `blank_screenshots` | its first screenshot, or more than 20% of them, is blank (grey-level spread below 0.5; blank frames have 0, dark-themed screens 1 to 2) | failed captures |
+| `identical_screenshots` | all its screenshots are the same file | the capture did not follow the actions |
+
+`DUPLICATE_RULES`: a session that was already kept makes this one redundant.
+
+| Rule | A session is dropped if a kept session has | Why |
+|---|---|---|
+| `duplicate_id` | the same id | |
+| `duplicate_screenshots` | the same sequence of screenshot files | the same recording listed twice |
+| `duplicate_demonstration` | the same instruction and the same actions (types, keys, text, positions on an 8x8 grid) | a repeated recording adds nothing |
+| `instruction_repeated_too_often` | its instruction, 8 times | one instruction must not dominate |
+
+AgentNet's own filters are in [section 1](#1-preparepy-sessions-splits-events).
+
 ### Layout
 
 The added datasets are a **second prepared set** with the same layout as AgentNet's, below `DATA/added/` and
@@ -246,15 +326,16 @@ unaffected.
 ```
 DATA/added/sources/<dataset>/   the download, and its conversion: sessions.jsonl, images.zip, image_stats.json,
                                 conversion.json
-DATA/added/prepared/            sessions.pkl, events.npz, vocab.json, summary.json, rejections.json, validation.json
+DATA/added/prepared/            sessions.pkl, events.npz, vocab.json, summary.json, rejections.json
 DATA/added/keys/                paraphrases.json, text_vecs.npy (and the default key set)
 DATA/added/keys_openai/         the label key set
 BULK/added/frames_dense[...]/   frame caches
 ```
 
-`WFEMB_SET=added` points `paths.DATA`, `paths.BULK` and everything built from them at this copy of the layout, so
-the key-set, paraphrase and frame-cache steps above run on the added set unchanged. Four things are taken from
-AgentNet so that both sets live in one input space:
+Every session in `sessions.pkl` has `split: "train"` and two more fields than AgentNet's: `dataset` and `origin`
+(`human` or `agent`). `WFEMB_SET=added` points `paths.DATA`, `paths.BULK` and everything built from them at this
+copy of the layout, so the key-set, paraphrase and frame-cache steps above run on the added set unchanged. Four
+things are taken from AgentNet so that both sets live in one input space:
 
 - the key vocabulary (`vocab.json` `key_vocab`): a key name AgentNet does not have becomes `<unk>`;
 - the PCA basis of each frame cache (`BULK/dense_pca_*.npz`);
@@ -269,125 +350,56 @@ texts and paraphrase keys are numbered on from AgentNet's.
 
 | # | Step | Command | Writes |
 |---|---|---|---|
-| 0, 1 | Download and convert | `python -m wfemb.prep.sources <dataset> --download` (without `--download`: convert what is already in `sources/<dataset>/`). Downloads what the converter reads: all of VideoCUA; ScaleCUA's navigation annotations and the screenshot archives of its human batches; GUI-360's `train` and `test` folders | the raw files, then `sources/<dataset>/{sessions.jsonl, images.zip, image_stats.json, conversion.json}` |
+| 1 | Download and convert | `python -m wfemb.prep.sources <dataset> --download` (without `--download`: convert what is already in `sources/<dataset>/`) | the raw files, then `sources/<dataset>/{sessions.jsonl, images.zip, image_stats.json, conversion.json}` |
 | 2 | Clean and prepare | `python -m wfemb.prep.add_datasets` | `added/prepared/` |
-| 3 | Validate | `python -m wfemb.prep.validate [--decode -1] [--contact_sheets DIR]` | `added/prepared/validation.json` |
+| 3 | Check the rules for the test set | `python -m wfemb.prep.held_out` (step 2 runs it too) | |
 | 4 | Typed-text vectors, default keys | `WFEMB_SET=added python -m wfemb.prep.text_embed` | `added/keys/` |
 | 5 | Paraphrases | `WFEMB_SET=added python -m wfemb.prep.paraphrase` (on Baseten: `runners/baseten/paraphrase.sh added`) | `added/keys/paraphrases.json` |
 | 6 | Label key set | `WFEMB_SET=added python -m wfemb.prep.openai_keys` | `added/keys_openai/` |
 | 7 | Frame caches | `WFEMB_SET=added python -m wfemb.prep.cache_frames --mode dense --grid 24` per shard (on Baseten: `WFEMB_SET=added WFEMB_SPECS="siglip2:24" truss train push runners/baseten/build_config.py`) | `BULK/added/frames_dense_g24/` |
 
-Step 3 is run again after steps 4 to 7: it also checks the key sets and frame caches that exist. Baseten reads the
-added set from the private data repository: upload `added/prepared/`, `added/keys/text_vecs.npy`,
-`added/keys_openai/` and `added/sources/<dataset>/images.zip` there (about 37 GB, nearly all of it screenshots),
-then run `runners/baseten/download.sh`.
+Baseten reads the added set from the private data repository: upload `added/prepared/`,
+`added/keys/text_vecs.npy`, `added/keys_openai/` and `added/sources/<dataset>/images.zip` there (about 37 GB,
+nearly all of it screenshots), then run `runners/baseten/download.sh`.
 
-### 1. Converters
+### Converters
 
 A converted session is one line of `sessions.jsonl` in AgentNet's format (`task_id`, `instruction`,
-`traj: [{index, image, value: {code}}]`) plus a `meta` object (`applications`, `websites`, `system`, `origin`:
-`human` or `agent`, screen size). `code` is `pyautogui.*` / `computer.*` calls with positions in [0, 1], so
-`actions.py` parses every dataset. `images.zip` holds every screenshot under a unique flat name, stored without
-compression. `image_stats.json` maps each screenshot to its size, the MD5 digest of its file and the spread
-(standard deviation) of its grey levels; `null` marks a screenshot that does not decode. `conversion.json` counts
-what the converter itself left out.
+`traj: [{index, image, value: {code}}]`) plus a `meta` object (`applications`, `websites`, `system`, `origin`,
+screen size). `code` is `pyautogui.*` / `computer.*` calls with positions in [0, 1], so `actions.py` parses every
+dataset. `images.zip` holds every screenshot under a unique flat name. `image_stats.json` maps each screenshot to
+its size, the MD5 digest of its file and the spread of its grey levels (`null`: it does not decode); the cleaning
+rules read it. `conversion.json` counts what the converter itself left out.
 
-**VideoCUA** logs raw input: a pointer move, then a click; a button press, moves, a release. `videocua.py` merges
-log entries into the steps AgentNet records:
-
-| Log entries | Step |
-|---|---|
-| `MOVE_TO`, `CLICK` | one click (double, triple, right or middle by the click's count and button) |
-| `MOVE_TO`, `MOUSE_DOWN`, `DRAG_TO`..., `MOUSE_UP` | `moveTo` + `dragTo` to the last drag position |
-| `MOUSE_DOWN`, `MOUSE_UP` with no drag between | a click at the pointer |
-| `MOVE_TO`, `SCROLL` | `moveTo` + `scroll` |
-| `MOVE_TO` followed by anything else | `moveTo` |
-| `TYPING`, `PRESS` | `write` + `press` |
-| `PRESS`, `HOTKEY` | `press` (one key) or `hotkey`; free text in the key field becomes `write` |
-| `KEY_DOWN`, `KEY_UP` of one key in a row | `press`; otherwise `keyDown` / `keyUp` |
-
-Key names are annotator-written (`Ctrl + V`, `"Cmd" + "V"`, `Right arrow`) and are normalized to AgentNet's
-(`common.key_tokens`). A step's screenshot is the video frame 0.1 s before its first log entry (as in VideoCUA's own
-converter); every session ends with the last video frame as an eventless step, like AgentNet's final step.
-Instructions rarely name their application, while AgentNet's usually do, so `In <application>, ` is put in front of
-an instruction that does not mention it (the original is kept in `meta.original_instruction`). The application
-name is the name of the zip, not the log's hand-typed `platform`.
-
-**ScaleCUA** ships one annotation row per (instruction wording, step, description wording). `scalecua.py` rebuilds
-sessions: a session is one screenshot folder; its first wording is the collector's instruction (the others are
-model-written rewrites and are not used); a row's step index is the number of previous operations it lists. The
-action calls already use AgentNet's format and normalized positions. Normalized: `swipe` becomes `scroll`
-(swiping up scrolls down; a full-screen swipe counts as 10 clicks), a `hotkey` of plain characters becomes `write`
-(the recorder logged typed digits that way), `response` and `success` end the session like `terminate`, pixel
-positions are divided by the screen size. A session with `failure()` or a failed `terminate` is left out, as is one
-whose step indices have gaps.
-
-**GUI-360** records an agent (UFO) that acts through the mouse and keyboard and through application APIs.
-`gui360.py` keeps the application-window screenshot of each step (`screenshot_clean`; the release has no
-full-desktop screenshots) and converts positions from its pixels. `click`, `type` (a click on the control, then
-`write`), `drag` and `wheel_mouse_input` become pointer and keyboard events. An API action
-(`select_table_range`, `insert_excel_table`, ...) has no input to record: its step keeps its screenshot and gets an
-event of type `other`. A step with an empty action or a `summary` is an eventless step (the agent's closing step).
-
-### 2. Cleaning (`clean.py`)
-
-`add_datasets.py` goes through the datasets in the order given and through each dataset's sessions by id, and
-keeps a session unless it breaks a rule. The first broken rule is counted (`summary.json`) and the session id is
-listed under it (`rejections.json`).
-
-| Rule | A session is dropped if | Why |
-|---|---|---|
-| `duplicate_id` | its id was already accepted | |
-| `bad_instruction` | its instruction has fewer than 2 or more than 150 words, or no letters | no usable label |
-| `held_out_application` | one of its applications or websites is a held-out test application of AgentNet (names compared after dropping vendor words and suffixes: `Mozilla Thunderbird` = `domain:thunderbird`) | the test split measures unseen applications |
-| `mentions_held_out_application` | its instruction names a held-out application (not checked for names that are ordinary words, such as `calendar` or `pages`, and not inside mail addresses) | the application is unknown for some web sessions; this errs on the side of dropping |
-| `evaluation_instruction` | its instruction (case and whitespace ignored) is a validation or test instruction | no leak of evaluation labels |
-| `near_evaluation_instruction` | its instruction has a character 3-to-5-gram TF-IDF cosine of 0.9 or more to a validation or test instruction | near-verbatim copies leak too |
-| `missing_screenshot` | a screenshot is missing or does not decode | |
-| `too_short`, `too_long` | it has fewer than 2 or more than 100 steps | AgentNet's range is 2 to 129 |
-| `portrait_screen` | a screenshot is more than 1.25 times as tall as wide | phone screens are not part of this data (VideoCUA has a few recordings of mobile apps) |
-| `few_input_actions` | fewer than half of its steps (before the final screenshot) have a pointer or keyboard event | mostly API actions or waiting: little to learn the workflow from |
-| `pointer_off_screen` | more than 30% of its positions lie exactly on the screen border | clipped positions: the coordinates did not belong to the screenshot |
-| `blank_screenshots` | its first screenshot, or more than 20% of them, is blank (grey-level spread below 0.5; real blank frames have 0, dark-themed screens 1 to 2) | failed captures |
-| `identical_screenshots` | all its screenshots are the same file | the capture did not follow the actions |
-| `duplicate_screenshots` | an accepted session has the same sequence of screenshot files | the same recording listed twice, or two questions answered from the same screens |
-| `duplicate_demonstration` | an accepted session has the same instruction and the same actions (types, keys, text, positions on an 8x8 grid) | a repeated recording adds nothing |
-| `instruction_repeated_too_often` | 8 sessions with its instruction were already accepted | one instruction must not dominate |
-
-Sessions that pass become `added/prepared/`, all with `split: "train"`, in the order they were accepted. Their
-session records have two more fields than AgentNet's: `dataset` and `origin`.
-
-### 3. Validation (`validate.py`)
-
-`validate.py` recomputes its checks from the written files, not from the cleaning code's bookkeeping:
-
-- structure: one events row per step, consecutive steps per session, one screenshot per step, valid event types,
-  positions on the screen, key ids within AgentNet's vocabulary, typed-text ids valid and all used, unique ids (also
-  against AgentNet);
-- leakage: no validation or test instruction, none near one, no held-out application;
-- duplicates: no repeated demonstration, no repeated screenshot sequence, at most 8 sessions per instruction;
-- screenshots: each one is in its archive; a sample (`--decode N`, all with `-1`) decodes and is not blank;
-- derived files, once built: one unit-length key per session with AgentNet's dimension, a consistent paraphrase
-  index, one vector per typed text, frame caches that cover every step with no missing screenshot.
-
-It also writes per-dataset statistics next to AgentNet's (steps per session, instruction length, event shares, share
-of unknown keys, applications) into `validation.json`, and with `--contact_sheets DIR` one image per sampled
-session with every step's screenshot and its pointer positions, for checking by eye that positions land on the
-controls they should.
+- **VideoCUA** logs raw input, which `videocua.py` merges into the steps AgentNet records: a pointer move and a
+  click become one click; a button press, moves and a release become `moveTo` + `dragTo`; typing followed by a key
+  press becomes `write` + `press`. Annotator-written key names (`Ctrl + V`, `"Cmd" + "V"`, `Right arrow`) are
+  normalized to AgentNet's. A step's screenshot is the video frame 0.1 s before its first log entry, and the last
+  video frame closes the session as an eventless step. `In <application>, ` is put in front of an instruction that
+  does not name its application, as AgentNet's usually do (the original is kept in `meta.original_instruction`).
+- **ScaleCUA** ships one annotation row per instruction wording and step. A session is one screenshot folder; its
+  first wording is the collector's instruction (the others are model-written rewrites and are not used). `swipe`
+  becomes `scroll`, a `hotkey` of plain characters becomes `write` (the recorder logged typed digits that way), and
+  `response` and `success` end the session like `terminate`. Sessions marked as failed are left out.
+- **GUI-360** records an agent that acts through the mouse and keyboard and through application APIs. Its `click`,
+  `type`, `drag` and `wheel_mouse_input` actions become pointer and keyboard events on the application-window
+  screenshot of the step. An API action (`select_table_range`, ...) has no input to record: its step keeps its
+  screenshot and gets an event of type `other`.
 
 ### Result (2026-11-11)
 
 26,926 added training sessions with 185,731 steps, next to AgentNet's 18,081 training sessions (22,083 sessions and
 408,384 steps over all splits). Sessions left out by the converters: VideoCUA 41 tasks without a video and 1 without
-actions; ScaleCUA 691 whose screenshots were not released, 23 marked as failed, 2 with missing steps.
+actions; ScaleCUA 691 whose screenshots were not released, 23 marked as failed, 2 with missing steps. The rules for
+the test set hold (`python -m wfemb.prep.held_out`).
 
 | | `videocua` | `scalecua` | `gui360` |
 |---|---|---|---|
 | converted sessions | 9,513 | 2,718 | 17,189 |
-| `bad_instruction` | 1 | 1 | 0 |
 | `held_out_application` | 335 | 236 | 0 |
 | `mentions_held_out_application` | 17 | 73 | 24 |
 | `near_evaluation_instruction` | 0 | 0 | 1 |
+| `bad_instruction` | 1 | 1 | 0 |
 | `too_short` | 0 | 13 | 635 |
 | `portrait_screen` | 5 | 0 | 1 |
 | `few_input_actions` | 0 | 6 | 821 |
@@ -403,7 +415,7 @@ actions; ScaleCUA 691 whose screenshots were not released, 23 marked as failed, 
 The held-out applications that cost the most sessions: OBS Studio (235), Brave (54) and IntelliJ IDEA (46) in
 VideoCUA; Microsoft Windows (73), Clock (52), GitHub (38), Google Docs (24) and Gmail (22) in ScaleCUA.
 
-How the kept sessions compare with AgentNet (`validation.json`):
+How the kept sessions compare with AgentNet:
 
 | | AgentNet | `videocua` | `scalecua` | `gui360` |
 |---|---|---|---|---|
@@ -419,8 +431,8 @@ How the kept sessions compare with AgentNet (`validation.json`):
 The added sessions are much shorter than AgentNet's and their instructions are shorter. Their share of eventless
 steps is higher mostly because every session has one closing step and has few steps.
 
-All validation checks pass, with every one of the 185,731 screenshots decoded. Contact sheets of samples from each
-dataset were checked by eye: pointer positions land on the controls the instructions call for. The inspection of
-rejected sessions changed three rules from their first version: a 16x16 perceptual hash treated screens with small
-changes as unchanged (replaced by file digests), the blank threshold caught dark-themed editors (lowered from 2 to
-0.5), and `gmail` inside mail addresses counted as a mention of Gmail.
+These statistics, a decode of all 185,731 screenshots, and contact sheets of sampled sessions (pointer positions
+land on the controls the instructions call for) come from a one-off script, `wfemb/prep/validate.py` at commit
+`2931a41`. Inspecting rejected sessions changed three rules from their first version: a 16x16 perceptual hash
+treated screens with small changes as unchanged (replaced by file digests), the blank threshold caught dark-themed
+editors (lowered from 2 to 0.5), and `gmail` inside mail addresses counted as a mention of Gmail.

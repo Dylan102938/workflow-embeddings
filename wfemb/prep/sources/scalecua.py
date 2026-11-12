@@ -76,12 +76,12 @@ def convert(raw_directory: Path, workers: int) -> None:
             if not parts:
                 failures["archive_not_released"] += len(members)
                 continue
-            wanted = {step["member"]: step["image"] for session in members for step in session["steps"]}
+            wanted = {member: image for session in members for member, image in session["images"].items()}
             found = copy_images(parts, wanted, writer, pool)
             released += members
             print(f"{date} {platform}: {found}/{len(wanted)} screenshots of {len(members)} sessions", flush=True)
     for session in released:
-        writer.add_session(record_of(session))
+        writer.add_session(session["record"])
     writer.close({"failures": dict(failures)})
     print(f"{writer.n_sessions} sessions; {dict(failures)}", flush=True)
 
@@ -121,54 +121,31 @@ def read_sessions(annotation_path: Path, date: str, platform: str, failures: Cou
 
 
 def session_of(date: str, platform: str, folder: str, wordings: list[str], raw_steps: list[dict]) -> dict | None:
-    """None if the collector marked the attempt as failed. The session ends at its first terminating call."""
+    """The session's record and its screenshots (archive member -> image name); None if the collector marked the
+    attempt as failed. The session ends at its first terminating call."""
     session_id = f"{DATASET}-{date[4:]}-{platform}-{re.sub(r'[^A-Za-z0-9]+', '_', folder.removesuffix('/images'))}"
-    steps = []
-    for raw_step in raw_steps:
+    images, trajectory = {}, []
+    for index, raw_step in enumerate(raw_steps):
         lines, outcome = normalize_code(raw_step["code"], *raw_step["size"])
         if outcome == "failed":
             return None
-        steps.append(
-            {
-                "member": f"{platform}/images/{raw_step['path']}",
-                "image": f"{session_id}-{Path(raw_step['path']).name}",
-                "code": "\n".join(lines),
-            }
-        )
+        image = f"{session_id}-{Path(raw_step['path']).name}"
+        images[f"{platform}/images/{raw_step['path']}"] = image
+        trajectory.append({"index": index, "image": image, "value": {"code": "\n".join(lines)}})
         if outcome == "ended":
             break
-    width, height = raw_steps[0]["size"]
-    return {
-        "id": session_id,
-        "date": date,
-        "platform": platform,
-        "folder": folder,
-        "instruction": wordings[0],
-        "rewrites": wordings[1:],
-        "steps": steps,
-        "screen": (width, height),
+    applications, websites = applications_of(platform, folder)
+    meta = {
+        "applications": applications,
+        "websites": websites,
+        "system": SYSTEMS[platform],
+        "origin": "human",
+        "screen_width": raw_steps[0]["size"][0],
+        "screen_height": raw_steps[0]["size"][1],
+        "instruction_rewrites": wordings[1:],
     }
-
-
-def record_of(session: dict) -> dict:
-    applications, websites = applications_of(session["platform"], session["folder"])
-    return {
-        "task_id": session["id"],
-        "instruction": session["instruction"],
-        "traj": [
-            {"index": index, "image": step["image"], "value": {"code": step["code"]}}
-            for index, step in enumerate(session["steps"])
-        ],
-        "meta": {
-            "applications": applications,
-            "websites": websites,
-            "system": SYSTEMS[session["platform"]],
-            "origin": "human",
-            "screen_width": session["screen"][0],
-            "screen_height": session["screen"][1],
-            "instruction_rewrites": session["rewrites"],
-        },
-    }
+    record = {"task_id": session_id, "instruction": wordings[0], "traj": trajectory, "meta": meta}
+    return {"date": date, "platform": platform, "images": images, "record": record}
 
 
 def applications_of(platform: str, folder: str) -> tuple[list[str], list[str]]:

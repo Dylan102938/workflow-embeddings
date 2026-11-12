@@ -22,7 +22,7 @@ A run is defined by these variables only (`config.Experiment`). Each has a short
 | `bs` | `batch_size` | `64` | sessions per batch |
 | `ep` | `n_epochs` | `45` | passes over the training sessions |
 | `beta` | `hard_negative_beta` | `0` | strength of hard-negative weighting (0 = off) |
-| `data` | `training_data` | `agentnet` | datasets trained on, joined by `+` (`agentnet+videocua`, ...); `all` = AgentNet and every added dataset ([DATA_PREP.md](DATA_PREP.md#added-datasets)). Validation and test are always AgentNet's (added 2026-11-11, under test) |
+| `data` | `training_data` | `agentnet` | datasets trained on, joined by `+` (`agentnet+videocua`, ...); `all` = AgentNet and every added dataset ([DATA_PREP.md](DATA_PREP.md#added-datasets)). Validation and test are always AgentNet's. The default reproduces earlier runs; the best model uses `all` (added 2026-11-11) |
 | `seed` | `seed` | `0` | seed of initialization, batch order, dropout and paraphrase draws |
 
 Everything else is the fixed recipe, shared by all runs: `TrainConfig`, `EvalConfig` and `DataConfig` in
@@ -83,7 +83,7 @@ integers (`beta-0`, `beta-2`), floats below 0.01 in short scientific form (`lr-5
 `%g` (`drop-0.3`). `wfemb.config.Experiment.id` / `Experiment.from_id` round-trip exactly; an id written before a variable was added
 is read with that variable's default. The best model so far is
 
-`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-agentnet_seed-0`
+`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-all_seed-0`
 
 Results are always reported and named with these ids.
 

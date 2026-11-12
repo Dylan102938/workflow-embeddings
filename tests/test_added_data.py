@@ -148,7 +148,7 @@ def test_a_good_session_is_kept(held_out):
             dict(codes=("pyautogui.click(x=5, y=7)", "pyautogui.click(x=3, y=9)", "computer.terminate()")),
             "pointer_off_screen",
         ),
-        (dict(stats=[screenshot(0, spread=0.5), screenshot(1), screenshot(2)]), "blank_screenshots"),
+        (dict(stats=[screenshot(0, spread=0.1), screenshot(1), screenshot(2)]), "blank_screenshots"),
         (dict(stats=[screenshot(7)] * 3), "identical_screenshots"),
     ],
 )
@@ -156,9 +156,19 @@ def test_rejections(held_out, changes, reason):
     assert clean.rejection_reason(candidate(**changes), held_out, clean.Deduplicator()) == reason
 
 
-def test_an_ambiguous_held_out_name_in_the_instruction_is_not_a_mention(held_out):
-    kept = candidate(instruction="Add the meeting to the calendar view of the project")
-    assert clean.rejection_reason(kept, held_out, clean.Deduplicator()) is None
+@pytest.mark.parametrize(
+    "instruction",
+    ["Add the meeting to the calendar view of the project", "Invite ana@thunderbird.net to the workspace"],
+)
+def test_ordinary_words_and_mail_addresses_are_not_mentions(held_out, instruction):
+    assert clean.rejection_reason(candidate(instruction=instruction), held_out, clean.Deduplicator()) is None
+
+
+def test_a_dark_screen_and_a_tall_window_are_kept(held_out):
+    dark_theme = [screenshot(0, spread=1.4), screenshot(1), screenshot(2)]
+    assert clean.rejection_reason(candidate(stats=dark_theme), held_out, clean.Deduplicator()) is None
+    tall_window = [screenshot(index, size=(1028, 1080)) for index in range(3)]
+    assert clean.rejection_reason(candidate(stats=tall_window), held_out, clean.Deduplicator()) is None
 
 
 def test_duplicates_and_repeated_instructions(held_out):

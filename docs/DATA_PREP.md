@@ -341,15 +341,15 @@ listed under it (`rejections.json`).
 | `duplicate_id` | its id was already accepted | |
 | `bad_instruction` | its instruction has fewer than 2 or more than 150 words, or no letters | no usable label |
 | `held_out_application` | one of its applications or websites is a held-out test application of AgentNet (names compared after dropping vendor words and suffixes: `Mozilla Thunderbird` = `domain:thunderbird`) | the test split measures unseen applications |
-| `mentions_held_out_application` | its instruction names a held-out application (not checked for names that are ordinary words, such as `calendar` or `pages`) | the application is unknown for some web sessions; this errs on the side of dropping |
+| `mentions_held_out_application` | its instruction names a held-out application (not checked for names that are ordinary words, such as `calendar` or `pages`, and not inside mail addresses) | the application is unknown for some web sessions; this errs on the side of dropping |
 | `evaluation_instruction` | its instruction (case and whitespace ignored) is a validation or test instruction | no leak of evaluation labels |
 | `near_evaluation_instruction` | its instruction has a character 3-to-5-gram TF-IDF cosine of 0.9 or more to a validation or test instruction | near-verbatim copies leak too |
 | `missing_screenshot` | a screenshot is missing or does not decode | |
 | `too_short`, `too_long` | it has fewer than 2 or more than 100 steps | AgentNet's range is 2 to 129 |
-| `portrait_screen` | a screenshot is taller than wide | phone screens are not part of this data |
+| `portrait_screen` | a screenshot is more than 1.25 times as tall as wide | phone screens are not part of this data (VideoCUA has a few recordings of mobile apps) |
 | `few_input_actions` | fewer than half of its steps (before the final screenshot) have a pointer or keyboard event | mostly API actions or waiting: little to learn the workflow from |
 | `pointer_off_screen` | more than 30% of its positions lie exactly on the screen border | clipped positions: the coordinates did not belong to the screenshot |
-| `blank_screenshots` | its first screenshot, or more than 20% of them, is blank (grey-level spread below 2) | failed captures |
+| `blank_screenshots` | its first screenshot, or more than 20% of them, is blank (grey-level spread below 0.5; real blank frames have 0, dark-themed screens 1 to 2) | failed captures |
 | `identical_screenshots` | all its screenshots are the same file | the capture did not follow the actions |
 | `duplicate_screenshots` | an accepted session has the same sequence of screenshot files | the same recording listed twice, or two questions answered from the same screens |
 | `duplicate_demonstration` | an accepted session has the same instruction and the same actions (types, keys, text, positions on an 8x8 grid) | a repeated recording adds nothing |
@@ -375,3 +375,53 @@ It also writes per-dataset statistics next to AgentNet's (steps per session, ins
 of unknown keys, applications) into `validation.json`, and with `--contact_sheets DIR` one image per sampled
 session with every step's screenshot and its pointer positions, for checking by eye that positions land on the
 controls they should.
+
+### Result (2026-11-11)
+
+26,926 added training sessions with 185,731 steps, next to AgentNet's 18,081 training sessions (22,083 sessions and
+408,384 steps over all splits). Sessions left out by the converters: VideoCUA 41 tasks without a video and 1 without
+actions; ScaleCUA 691 whose screenshots were not released, 23 marked as failed, 2 with missing steps.
+
+| | `videocua` | `scalecua` | `gui360` |
+|---|---|---|---|
+| converted sessions | 9,513 | 2,718 | 17,189 |
+| `bad_instruction` | 1 | 1 | 0 |
+| `held_out_application` | 335 | 236 | 0 |
+| `mentions_held_out_application` | 17 | 73 | 24 |
+| `near_evaluation_instruction` | 0 | 0 | 1 |
+| `too_short` | 0 | 13 | 635 |
+| `portrait_screen` | 5 | 0 | 1 |
+| `few_input_actions` | 0 | 6 | 821 |
+| `pointer_off_screen` | 1 | 0 | 3 |
+| `blank_screenshots` | 13 | 1 | 0 |
+| `identical_screenshots` | 0 | 1 | 27 |
+| `duplicate_screenshots` | 5 | 75 | 1 |
+| `duplicate_demonstration` | 3 | 5 | 173 |
+| `instruction_repeated_too_often` | 0 | 0 | 17 |
+| **kept sessions** | **9,133** | **2,307** | **15,486** |
+| steps | 45,079 | 15,158 | 125,494 |
+
+The held-out applications that cost the most sessions: OBS Studio (235), Brave (54) and IntelliJ IDEA (46) in
+VideoCUA; Microsoft Windows (73), Clock (52), GitHub (38), Google Docs (24) and Gmail (22) in ScaleCUA.
+
+How the kept sessions compare with AgentNet (`validation.json`):
+
+| | AgentNet | `videocua` | `scalecua` | `gui360` |
+|---|---|---|---|---|
+| recorded by | people | people | people | an agent |
+| steps per session, median (5% to 95%) | 17 (8 to 34) | 4 (2 to 10) | 5 (2 to 16) | 6 (2 to 22) |
+| instruction words, median (5% to 95%) | 30 (10 to 71) | 11 (6 to 19) | 11 (3 to 30) | 13 (8 to 23) |
+| applications | 1,377 | 84 | 26 | 3 |
+| distinct instructions | 21,819 | 9,114 | 2,262 | 14,718 |
+| steps without events | 5% | 20% | 15% | 18% |
+| key presses unknown to the vocabulary | 0.3% | 1.4% | 3.5% | 0% |
+| clicks / typing among events | 63% / 8% | 67% / 9% | 64% / 11% | 82% / 9% |
+
+The added sessions are much shorter than AgentNet's and their instructions are shorter. Their share of eventless
+steps is higher mostly because every session has one closing step and has few steps.
+
+All validation checks pass, with every one of the 185,731 screenshots decoded. Contact sheets of samples from each
+dataset were checked by eye: pointer positions land on the controls the instructions call for. The inspection of
+rejected sessions changed three rules from their first version: a 16x16 perceptual hash treated screens with small
+changes as unchanged (replaced by file digests), the blank threshold caught dark-themed editors (lowered from 2 to
+0.5), and `gmail` inside mail addresses counted as a mention of Gmail.

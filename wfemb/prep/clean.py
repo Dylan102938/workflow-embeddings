@@ -15,7 +15,8 @@ MAX_STEPS = 100
 MIN_INSTRUCTION_WORDS = 2
 MAX_INSTRUCTION_WORDS = 150
 MIN_ACTING_STEP_FRACTION = 0.5
-BLANK_SPREAD = 2.0  # grey-level standard deviation below which a screenshot shows nothing
+BLANK_SPREAD = 0.5  # grey-level standard deviation below which a screenshot shows nothing (dark themes: 1 to 2)
+PORTRAIT_RATIO = 1.25  # height / width above which a screenshot is a phone screen
 MAX_BLANK_FRACTION = 0.2
 MAX_EDGE_POINTER_FRACTION = 0.3
 EVALUATION_SIMILARITY = 0.9  # character n-gram TF-IDF cosine to a validation or test instruction
@@ -109,7 +110,7 @@ def rejection_reason(candidate: Candidate, held_out: EvaluationSets, seen: Dedup
         return "too_short"
     if len(candidate.steps) > MAX_STEPS:
         return "too_long"
-    if any(stats["size"][0] < stats["size"][1] for stats in candidate.image_stats):
+    if any(stats["size"][1] > PORTRAIT_RATIO * stats["size"][0] for stats in candidate.image_stats):
         return "portrait_screen"
     if acting_step_fraction(candidate.steps) < MIN_ACTING_STEP_FRACTION:
         return "few_input_actions"
@@ -175,7 +176,7 @@ def evaluation_sets(sessions: list[dict], test_applications: list[str]) -> Evalu
     mentionable = sorted(
         {name for name in names if len(name) >= MIN_MENTION_LENGTH and name not in AMBIGUOUS_NAMES}, key=len
     )
-    pattern = r"(?<![\w.])(?:" + "|".join(re.escape(name) for name in reversed(mentionable)) + r")(?![\w])"
+    pattern = r"(?<![\w.@])(?:" + "|".join(re.escape(name) for name in reversed(mentionable)) + r")(?![\w])"
     return EvaluationSets(
         groups={session["group"] for session in sessions if session["split"] != "train"},
         application_names={canonical_application(key) for key in test_applications},

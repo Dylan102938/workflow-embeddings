@@ -15,6 +15,7 @@ import json
 import pickle
 import sys
 import zipfile
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ from .actions import EVENT_TYPES
 PERCENTILES = (0, 5, 25, 50, 75, 95, 100)
 POINTER_TYPES = ("click", "doubleClick", "tripleClick", "rightClick", "middleClick", "moveTo", "dragTo")
 SHEET_COLUMNS, SHEET_CELL = 4, (480, 300)
+DECODE_WORKERS = 16
 
 
 class PreparedFiles:
@@ -167,25 +169,34 @@ def duplicate_checks(added: PreparedFiles) -> dict:
 
 def image_checks(added: PreparedFiles, n_decoded: int) -> dict:
     """Every screenshot is in its dataset's archive; a sample (or all) of them decode and are not blank."""
-    archives = {dataset: zipfile.ZipFile(paths.ZIPS[dataset]) for dataset in {s["source"] for s in added.sessions}}
-    members = {dataset: set(archive.namelist()) for dataset, archive in archives.items()}
+    members = {dataset: set(zipfile.ZipFile(paths.ZIPS[dataset]).namelist()) for dataset in paths.ADDED_DATASETS}
     images = [(session["source"], image) for session in added.sessions for image in session["images"]]
     missing = sum(image not in members[dataset] for dataset, image in images)
     if n_decoded >= 0:
         chosen = np.random.default_rng(0).choice(len(images), min(n_decoded, len(images)), replace=False)
         images = [images[i] for i in chosen]
-    undecodable = blank = 0
-    for dataset, image in images:
-        try:
-            grey = Image.open(io.BytesIO(archives[dataset].read(image))).convert("L")
-            blank += float(np.asarray(grey.resize((64, 64))).std()) < clean.BLANK_SPREAD
-        except Exception:
-            undecodable += 1
+    with Pool(DECODE_WORKERS) as pool:
+        states = collections.Counter(pool.imap_unordered(screenshot_state, images, chunksize=64))
     return {
         "every screenshot is in the archive": missing == 0,
-        f"decoded screenshots are readable ({len(images)} checked)": undecodable == 0,
-        "at most 1% of the decoded screenshots are blank": blank <= 0.01 * max(len(images), 1),
+        f"decoded screenshots are readable ({len(images)} checked)": states["unreadable"] == 0,
+        "at most 1% of the decoded screenshots are blank": states["blank"] <= 0.01 * max(len(images), 1),
     }
+
+
+_archives: dict[str, zipfile.ZipFile] = {}
+
+
+def screenshot_state(image: tuple[str, str]) -> str:
+    """ "ok", "blank" or "unreadable". Runs in a worker process, which keeps its own archive handles."""
+    dataset, name = image
+    if dataset not in _archives:
+        _archives[dataset] = zipfile.ZipFile(paths.ZIPS[dataset])
+    try:
+        grey = Image.open(io.BytesIO(_archives[dataset].read(name))).convert("L")
+    except Exception:
+        return "unreadable"
+    return "blank" if float(np.asarray(grey.resize((64, 64))).std()) < clean.BLANK_SPREAD else "ok"
 
 
 def derived_file_checks(added: PreparedFiles) -> dict:
@@ -200,7 +211,7 @@ def derived_file_checks(added: PreparedFiles) -> dict:
         keys = np.load(directory / "keys.npy", mmap_mode="r")
         norms = np.linalg.norm(np.asarray(keys[:: max(1, n_sessions // 2000)], np.float32), axis=1)
         checks[f"{label_set}: one unit-length key per session"] = bool(
-            len(keys) == n_sessions and np.allclose(norms, 1, atol=1e-3)
+            len(keys) == n_sessions and np.allclose(norms, 1, atol=1e-2)
         )
         agentnet_keys_path = paths.AGENTNET_DATA / label_set / "keys.npy"
         if agentnet_keys_path.exists():

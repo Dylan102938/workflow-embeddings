@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -74,6 +75,7 @@ def data_config(tmp_path_factory) -> DataConfig:
 
 @pytest.mark.parametrize("architecture,beta", [("late-history-transf", 2.0), ("transf", 0.0), ("gru", 0.0)])
 def test_training_writes_the_results_files(data_config, tmp_path, architecture, beta):
+    from wfemb.data import WorkflowDataset
     from wfemb.train import training_loop
 
     experiment = Experiment(architecture=architecture, hard_negative_beta=beta, **SMALL)
@@ -104,6 +106,12 @@ def test_training_writes_the_results_files(data_config, tmp_path, architecture, 
     assert [row["step"] for row in evals] == [10, 20, 24]
     assert {"val_loss", "val_r@1", "val_r@5", "val_avg_log_dist_20NN"} <= set(evals[0])
     assert {"best_step", "test_loss", "test_r@1", "test_r@5", "test_avg_log_dist_20NN"} <= set(final)
+    assert "val_unseen_apps_loss" not in final
+    groups = WorkflowDataset(data_config, experiment).test_groups(np.arange(255, 300))
+    assert 0 < groups["unseen_apps"].sum() < 45 and (groups["unseen_apps"] ^ groups["seen_app"]).all()
+    for metric in ("loss", "r@1", "r@5", "avg_log_dist_20NN"):
+        of_groups = sum(final[f"test_{group}_{metric}"] * members.sum() for group, members in groups.items()) / 45
+        assert of_groups == pytest.approx(final[f"test_{metric}"], rel=1e-4, abs=1e-5)
     saved = json.loads((run_dir / "config.json").read_text())
     assert saved["id"] == experiment.id and Experiment(**saved["experiment"]) == experiment
 

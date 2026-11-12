@@ -54,6 +54,11 @@ def write_prepared_set(root: Path, frames_dir: Path, n_sessions: int, seed: int,
 
     prefix = "added" if added else "s"
 
+    def app_of(index: int) -> str:
+        """Half of the test sessions use applications that no training session has."""
+        held_out = split_of(index) == "test" and index % 2 == 0
+        return f"app:{'new' if held_out else ''}{intents[index] % N_APPS}"
+
     sessions = [
         {
             "id": f"{prefix}{index}",
@@ -63,8 +68,8 @@ def write_prepared_set(root: Path, frames_dir: Path, n_sessions: int, seed: int,
             "group": f"{prefix}g{index if index % 10 else index - 1}",
             "os": ["Windows", "Darwin", "Ubuntu"][index % 3],
             "domain": "x",
-            "app": f"app:{intents[index] % N_APPS}",
-            "app_keys": [f"app:{intents[index] % N_APPS}"],
+            "app": app_of(index),
+            "app_keys": [app_of(index)],
             "task_completed": True,
             "screen": (1920, 1080),
             "split": split_of(index),

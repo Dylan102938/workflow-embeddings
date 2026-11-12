@@ -270,8 +270,7 @@ texts and paraphrase keys are numbered on from AgentNet's.
 
 | # | Step | Command | Writes |
 |---|---|---|---|
-| 0 | Download | `hf download <repository> --repo-type dataset --local-dir DATA/added/sources/<dataset>` (ScaleCUA: `annotations/*navigation*` and the `data/data_<date>/{mac,ubuntu,windows,web}.tar.gz.part-*` archives of the human batches; GUI-360: `train/*`, `test/*`) | the raw files |
-| 1 | Convert | `python -m wfemb.prep.sources <dataset>` | `sources/<dataset>/{sessions.jsonl, images.zip, image_stats.json, conversion.json}` |
+| 0, 1 | Download and convert | `python -m wfemb.prep.sources <dataset> --download` (without `--download`: convert what is already in `sources/<dataset>/`). Downloads what the converter reads: all of VideoCUA; ScaleCUA's navigation annotations and the screenshot archives of its human batches; GUI-360's `train` and `test` folders | the raw files, then `sources/<dataset>/{sessions.jsonl, images.zip, image_stats.json, conversion.json}` |
 | 2 | Clean and prepare | `python -m wfemb.prep.add_datasets` | `added/prepared/` |
 | 3 | Validate | `python -m wfemb.prep.validate [--decode -1] [--contact_sheets DIR]` | `added/prepared/validation.json` |
 | 4 | Typed-text vectors, default keys | `WFEMB_SET=added python -m wfemb.prep.text_embed` | `added/keys/` |
@@ -280,8 +279,9 @@ texts and paraphrase keys are numbered on from AgentNet's.
 | 7 | Frame caches | `WFEMB_SET=added python -m wfemb.prep.cache_frames --mode dense --grid 24` per shard (on Baseten: `WFEMB_SET=added WFEMB_SPECS="siglip2:24" truss train push runners/baseten/build_config.py`) | `BULK/added/frames_dense_g24/` |
 
 Step 3 is run again after steps 4 to 7: it also checks the key sets and frame caches that exist. Baseten reads the
-added set from the private data repository: `hf upload <repository> DATA/added added --repo-type dataset` (without
-the raw downloads), then `runners/baseten/download.sh`.
+added set from the private data repository: upload `added/prepared/`, `added/keys/text_vecs.npy`,
+`added/keys_openai/` and `added/sources/<dataset>/images.zip` there (about 37 GB, nearly all of it screenshots),
+then run `runners/baseten/download.sh`.
 
 ### 1. Converters
 

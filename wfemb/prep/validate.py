@@ -202,8 +202,10 @@ def derived_file_checks(added: PreparedFiles) -> dict:
         checks[f"{label_set}: one unit-length key per session"] = bool(
             len(keys) == n_sessions and np.allclose(norms, 1, atol=1e-3)
         )
-        agentnet_keys = np.load(paths.AGENTNET_DATA / label_set / "keys.npy", mmap_mode="r")
-        checks[f"{label_set}: same dimension as AgentNet's"] = keys.shape[1] == agentnet_keys.shape[1]
+        agentnet_keys_path = paths.AGENTNET_DATA / label_set / "keys.npy"
+        if agentnet_keys_path.exists():
+            agentnet_keys = np.load(agentnet_keys_path, mmap_mode="r")
+            checks[f"{label_set}: same dimension as AgentNet's"] = keys.shape[1] == agentnet_keys.shape[1]
         if (directory / "para_index.npz").exists():
             index = np.load(directory / "para_index.npz")
             n_paraphrase_keys = len(np.load(directory / "para_keys.npy", mmap_mode="r"))

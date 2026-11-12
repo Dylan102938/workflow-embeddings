@@ -13,10 +13,15 @@ from pathlib import Path
 from .common import TERMINATE, SourceWriter, call, copy_images, unit
 
 DATASET = "gui360"
+REPOSITORY = "vyokky/GUI-360"
 SPLITS = ("train", "test")
 APPLICATIONS = {"word": "Microsoft Word", "excel": "Microsoft Excel", "ppt": "Microsoft PowerPoint"}
 FALLBACK_SIZE = (1040, 736)
 API_CALL = "computer.api()"  # an action through the application's API: no pointer or keyboard input to record
+
+
+def download_patterns(raw_directory: Path) -> list[list[str]]:
+    return [[f"{split}/*" for split in SPLITS]]
 
 
 def convert(raw_directory: Path, workers: int) -> None:

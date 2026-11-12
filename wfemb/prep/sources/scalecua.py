@@ -9,12 +9,14 @@ import ast
 import json
 import re
 from collections import Counter
+from collections.abc import Iterator
 from multiprocessing import Pool
 from pathlib import Path
 
 from .common import MODIFIERS, NAMED_KEYS, TERMINATE, SourceWriter, call, copy_images, key_name
 
 DATASET = "scalecua"
+REPOSITORY = "OpenGVLab/ScaleCUA-Data"
 ANNOTATION_NAME = re.compile(r"data_(\d{8})_(mac|ubuntu|windows|web)_navigation_\d+_boost_instruction\.jsonl")
 TASK = re.compile(r"Task: (.*?)\n\nPrevious operations:(.*)", re.S)
 PREVIOUS_STEP = re.compile(r"^Step \d+:", re.M)
@@ -43,6 +45,18 @@ WEBSITES = {
     "github_com": "GitHub",
     "openstreetmap_org": "OpenStreetMap",
 }
+
+
+def download_patterns(raw_directory: Path) -> Iterator[list[str]]:
+    """The annotations first: their names say which screenshot archives belong to the human batches."""
+    yield ["annotations/*_navigation_*_boost_instruction.jsonl"]
+    yield [
+        f"data/data_{match.group(1)}/{match.group(2)}.tar.gz.part-*"
+        for match in map(
+            ANNOTATION_NAME.fullmatch, sorted(path.name for path in (raw_directory / "annotations").glob("*"))
+        )
+        if match
+    ]
 
 
 def convert(raw_directory: Path, workers: int) -> None:

@@ -1,4 +1,5 @@
-"""What every converter writes: DATA/sources/<dataset>/{sessions.jsonl, images.zip, image_stats.json}.
+"""What every converter writes into DATA/added/sources/<dataset>/: sessions.jsonl, images.zip, image_stats.json,
+conversion.json.
 
 Formats: docs/DATA_PREP.md.
 """
@@ -10,6 +11,7 @@ import io
 import json
 import re
 import tarfile
+import time
 import zipfile
 from multiprocessing.pool import Pool
 from pathlib import Path
@@ -22,6 +24,7 @@ from ...storage import paths
 
 Image.MAX_IMAGE_PIXELS = None
 STATS_BATCH = 64
+DOWNLOAD_ATTEMPTS = 120
 
 KEY_ALIASES = {
     "control": "ctrl",
@@ -73,6 +76,20 @@ NAMED_KEYS = MODIFIERS | {
     "num_lock",
     *(f"f{number}" for number in range(1, 25)),
 }
+
+
+def download(repository: str, patterns: list[str], directory: Path) -> None:
+    """The files of a Hugging Face dataset that match the patterns; retried, as many small files hit rate limits."""
+    from huggingface_hub import snapshot_download
+
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            snapshot_download(repository, repo_type="dataset", local_dir=directory, allow_patterns=patterns)
+            return
+        except Exception as error:
+            print(f"download attempt {attempt + 1} failed: {type(error).__name__}", flush=True)
+            time.sleep(30)
+    raise SystemExit(f"could not download {repository}")
 
 
 class ConvertedImage(NamedTuple):

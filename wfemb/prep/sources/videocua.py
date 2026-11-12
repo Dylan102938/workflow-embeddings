@@ -18,6 +18,7 @@ from pathlib import Path
 from .common import TERMINATE, ConvertedImage, SourceWriter, call, image_stats, is_key_combination, key_tokens, unit
 
 DATASET = "videocua"
+REPOSITORY = "ServiceNow/VideoCUA"
 SECONDS_BEFORE_ACTION = 0.1  # a step's screenshot is the video frame this long before its first log entry
 END_TYPES = {"AFTER_LAST_ACTION", "TERMINATE", "TERMINATE_SUCCESS"}
 BUTTONS = {"left", "right", "middle"}
@@ -28,6 +29,10 @@ SEEKS_PER_COMMAND = 16
 class Step:
     timestamp: float | None  # None: the last frame of the video
     calls: list[str] = field(default_factory=list)
+
+
+def download_patterns(raw_directory: Path) -> list[list[str]]:
+    return [["raw_data/*"]]
 
 
 def convert(raw_directory: Path, workers: int) -> None:
@@ -70,7 +75,7 @@ def convert_task(job: tuple[str, str]) -> tuple[dict | None, list[ConvertedImage
                 for name in archive.namelist()
                 if name.startswith(task_directory + "video/") and name.endswith(".mp4")
             )
-            with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch:
+            with tempfile.TemporaryDirectory() as scratch:
                 video_path = Path(scratch) / "video.mp4"
                 with archive.open(video_name) as source, open(video_path, "wb") as target:
                     shutil.copyfileobj(source, target)

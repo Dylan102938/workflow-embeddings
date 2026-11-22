@@ -19,7 +19,7 @@ import torch
 from ..config import NATIVE_TOWERS, tower_frame_cache_name
 from ..storage import paths
 from ..storage.frames import TokenShardWriter
-from .cache_frames import PLACEHOLDER_IMAGE_SIZE, Frame, all_frames, to_bf16_bits
+from .cache_frames import PLACEHOLDER_IMAGE_SIZE, Frame, all_frames
 from .prepare import load_sessions
 from .splitzip import SplitZip
 
@@ -113,7 +113,7 @@ def encode_frames(tower, frames: list[Frame], writer: TokenShardWriter, args: ar
         prefetch_factor=4 if args.workers else None,
         pin_memory=True,
     )
-    written = BackgroundWriter(writer)
+    written = BackgroundWriter(writer, buffer_tokens=args.batch_size * args.budget)
     placeholder = torch.zeros(3, *PLACEHOLDER_IMAGE_SIZE[::-1], dtype=torch.uint8)
     started = waiting_since = time.time()
     done, missing, waited = 0, 0, 0.0
@@ -154,21 +154,31 @@ def encode_batch(tower, screenshots: list[torch.Tensor]) -> tuple[torch.Tensor, 
 
 
 class BackgroundWriter:
-    """Copies token batches off the GPU and appends them to the shard on a second thread, in order."""
+    """Appends token batches to the shard on a second thread, in order.
 
-    def __init__(self, writer: TokenShardWriter, depth: int = 4):
+    A batch leaves the GPU through a pinned buffer: a copy to ordinary memory would hold up the tower's next batch.
+    """
+
+    def __init__(self, writer: TokenShardWriter, buffer_tokens: int, depth: int = 4):
         self.writer, self.blocked_seconds = writer, 0.0
-        self.queue = queue.Queue(depth)
+        self.queue, self.buffers = queue.Queue(), queue.Queue()
+        for _ in range(depth):
+            self.buffers.put(torch.empty((buffer_tokens, writer.dim), dtype=torch.int16).pin_memory())
         self.error = None
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def append(self, tokens: torch.Tensor, grids: list[tuple[int, int]], checkpoint: bool = False):
+        """tokens: bfloat16 [n, dim] on the GPU."""
         if self.error is not None:
             raise self.error
         started = time.time()
-        self.queue.put((tokens, grids, checkpoint))
+        buffer = self.buffers.get()
         self.blocked_seconds += time.time() - started
+        buffer[: len(tokens)].copy_(tokens.view(torch.int16), non_blocking=True)
+        copied = torch.cuda.Event()
+        copied.record()
+        self.queue.put((buffer, len(tokens), copied, grids, checkpoint))
 
     def close(self):
         self.queue.put(None)
@@ -178,15 +188,16 @@ class BackgroundWriter:
 
     def _run(self):
         while (item := self.queue.get()) is not None:
-            if self.error is not None:
-                continue
+            buffer, n_tokens, copied, grids, checkpoint = item
             try:
-                tokens, grids, checkpoint = item
-                self.writer.append(to_bf16_bits(tokens), grids)
-                if checkpoint:
-                    self.writer.checkpoint()
+                if self.error is None:
+                    copied.synchronize()
+                    self.writer.append(buffer[:n_tokens].numpy().view(np.uint16), grids)
+                    if checkpoint:
+                        self.writer.checkpoint()
             except Exception as error:
                 self.error = error
+            self.buffers.put(buffer)
 
 
 if __name__ == "__main__":

@@ -8,12 +8,16 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import urllib.request
 
 import torch
+import torch.nn.functional as F
 from torchvision.transforms.v2 import InterpolationMode
 from torchvision.transforms.v2 import functional as transforms
 
+DOWNLOAD_ATTEMPTS = 6
+DOWNLOAD_BYTES = 64 << 20  # per request, so that a stalled connection costs one piece
 INKLING_WEIGHT_NAMES = {  # checkpoint name -> name in transformers' Inkling2VisionModel
     r"^backbone\.embeddings\.position_embedding$": "embeddings.position_embedding.weight",
     r"^backbone\.embeddings\.": "embeddings.",
@@ -64,6 +68,16 @@ class Tower:
         return torch.tensor([[1, rows, columns]] * batch_size, device=self.device)
 
 
+def attention_per_image(queries, keys, values, n_images: int) -> torch.Tensor:
+    """Self-attention within each of n_images equally long images packed in one sequence.
+
+    [sequence, heads, d] each -> [sequence, heads * d]. transformers runs one attention call per image instead.
+    """
+    length = queries.shape[0] // n_images
+    queries, keys, values = (x.view(n_images, length, *x.shape[1:]).transpose(1, 2) for x in (queries, keys, values))
+    return F.scaled_dot_product_attention(queries, keys, values).transpose(1, 2).flatten(0, 1).flatten(1)
+
+
 def patches(pixels: torch.Tensor, patch: int) -> torch.Tensor:
     """[B, C, H, W] -> [B, H / patch, W / patch, patch, patch, C]"""
     batch, channels, height, width = pixels.shape
@@ -103,8 +117,15 @@ class Qwen38(Tower):
     repository, stride, dim, interpolation = "Qwen/Qwen3.8-27B", 32, 5120, InterpolationMode.BICUBIC
 
     def load(self):
+        from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionConfig, Qwen3_5VisionModel
 
+        def attention(self, hidden_states, cu_seqlens, position_embeddings, **kwargs):
+            heads = self.qkv(hidden_states).view(len(hidden_states), 3, self.num_heads, -1).unbind(1)
+            queries, keys = qwen.apply_rotary_pos_emb_vision(heads[0], heads[1], *position_embeddings)
+            return self.proj(attention_per_image(queries, keys, heads[2], len(cu_seqlens) - 1))
+
+        qwen.Qwen3_5VisionAttention.forward = attention
         model = Qwen3_5VisionModel(Qwen3_5VisionConfig(**checkpoint_config(self.repository)["vision_config"]))
         model.load_state_dict(checkpoint_tensors(self.repository, "model.visual."))
         return model
@@ -123,8 +144,16 @@ class Inkling2(Tower):
     repository, stride, dim, interpolation = "thinkingmachines/Inkling-2-Small", 40, 4608, InterpolationMode.BICUBIC
 
     def load(self):
+        from transformers.models.inkling2 import modeling_inkling2 as inkling
         from transformers.models.inkling2.modeling_inkling2 import Inkling2VisionConfig, Inkling2VisionModel
 
+        def attention(self, hidden_states, cu_seqlens, position_embeddings, **kwargs):
+            projections = (self.q_proj, self.k_proj, self.v_proj)
+            heads = [project(hidden_states).view(len(hidden_states), self.num_heads, -1) for project in projections]
+            queries, keys = inkling.apply_rotary_pos_emb_vision(heads[0], heads[1], *position_embeddings)
+            return self.out_proj(attention_per_image(queries, keys, heads[2], len(cu_seqlens) - 1)), None
+
+        inkling.Inkling2VisionAttention.forward = attention
         model = Inkling2VisionModel(Inkling2VisionConfig(**checkpoint_config(self.repository)["vision_config"]))
         tensors = checkpoint_tensors(self.repository, "model.visual.")
         for pattern, replacement in INKLING_WEIGHT_NAMES.items():
@@ -147,8 +176,14 @@ def checkpoint_file(repository: str, file: str, first: int = 0, end: int | None 
         f"https://huggingface.co/{repository}/resolve/main/{file}",
         headers={"Range": f"bytes={first}-{'' if end is None else end - 1}"},
     )
-    with urllib.request.urlopen(request) as response:
-        return response.read()
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except OSError:  # a stalled or dropped connection
+            if attempt == DOWNLOAD_ATTEMPTS - 1:
+                raise
+            time.sleep(5)
 
 
 def checkpoint_config(repository: str) -> dict:
@@ -168,7 +203,9 @@ def checkpoint_tensors(repository: str, prefix: str) -> dict[str, torch.Tensor]:
         wanted = {name: entry for name, entry in header.items() if name.startswith(prefix)}
         first = min(entry["data_offsets"][0] for entry in wanted.values())
         last = max(entry["data_offsets"][1] for entry in wanted.values())
-        data = bytearray(checkpoint_file(repository, file, 8 + header_size + first, 8 + header_size + last))
+        data = bytearray()
+        for start in range(8 + header_size + first, 8 + header_size + last, DOWNLOAD_BYTES):
+            data += checkpoint_file(repository, file, start, min(start + DOWNLOAD_BYTES, 8 + header_size + last))
         for name, entry in wanted.items():
             if entry["dtype"] != "BF16":
                 raise ValueError(f"{repository} {name}: {entry['dtype']} weights are not supported")

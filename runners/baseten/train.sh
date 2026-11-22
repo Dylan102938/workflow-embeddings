@@ -9,7 +9,7 @@ cd "$BT_WORKING_DIR"
 source runners/baseten/setup.sh
 SECTION=$1
 export WFEMB_DATA=$BT_SCRATCH_DIR/data WFEMB_BULK=$BT_SCRATCH_DIR/bulk WFEMB_RESULTS=$BT_SCRATCH_DIR/results
-export WFEMB_LAUNCHER="baseten:${BT_TRAINING_JOB_ID:-$SECTION}"
+export WFEMB_LAUNCHER="baseten:${BT_TRAINING_JOB_ID:-$SECTION}" WFEMB_MAX_READ_BYTES=$(( 64 << 20 ))
 mkdir -p "$WFEMB_DATA/logs" "$WFEMB_BULK" "$WFEMB_RESULTS"
 t0=$(date +%s)
 cp -r "$TEAM"/data/{prepared,keys,keys_openai} "$WFEMB_DATA/"

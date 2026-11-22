@@ -21,6 +21,7 @@ DATA/keys/             the default key set (Qwen3-Embedding-0.6B) and the files 
 DATA/keys_openai/      the label key set used for training (OpenAI text-embedding-3-large)   (openai_keys.py)
 BULK/frames_dense[_g<grid>]/   frozen screen features, one folder per grid size   (cache_frames.py)
 BULK/dense_pca_g<grid>_d<dim>.npz   the PCA basis of that cache
+BULK/frames_<tower>_p<budget>/ a vision tower's own tokens, one folder per tower and token budget   (cache_tower_frames.py)
 DATA/added/, BULK/added/   the same layout for the datasets added to AgentNet (see "Added datasets")
 ```
 
@@ -42,7 +43,8 @@ Each step has a Slurm launcher in `runners/slurm/`; arguments after the launcher
 | 7 | Frame cache: shards | `sbatch runners/slurm/cache_frames.sbatch --mode dense --grid 24` (array of 8 shards) | 6 | `BULK/frames_dense_g24/` |
 
 Steps 2 to 5 and steps 6 to 7 are independent of each other. On Baseten, `runners/baseten/build.sh` runs step 7
-from PCA bases fitted on rnn.
+from PCA bases fitted on rnn. Runs with another `tower` than `siglip2-pca` read a
+[tower cache](#tower-caches-cache_tower_framespy) instead of steps 6 to 7.
 
 **Everything after step 1 is indexed by position in `sessions.pkl`** (session index) or by global step index.
 Re-running `prepare.py` with different data, filters or seed invalidates the key sets, the judged pools and the
@@ -219,6 +221,58 @@ AgentNet ships its screenshots as split ZIP archives (`images.z01` … `images.z
 quota cannot hold. `splitzip.SplitZip` therefore reads members straight from the parts: it treats them as one
 concatenated file and converts the archive's (disk, offset) positions, which count from the start of each part.
 It supports stored and deflated members and ZIP64, and nothing else.
+
+## Tower caches (`cache_tower_frames.py`)
+
+A run whose `tower` variable is not `siglip2-pca` reads a vision tower's own tokens: no pooling to a square grid, no
+PCA. `wfemb/prep/towers.py` holds the towers, `cache_tower_frames.py` writes one cache per tower and token budget,
+`BULK/frames_<tower>_p<budget>/`.
+
+| | `siglip2` | `qwen3.8` | `inkling2` |
+|---|---|---|---|
+| Model | [SigLIP2 So400m NaFlex](https://huggingface.co/google/siglip2-so400m-patch16-naflex) | vision tower of [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | vision tower of [Inkling 2 Small](https://huggingface.co/thinkingmachines/Inkling-2-Small) |
+| Frozen parameters | 428M | 461M (encoder 415M, merger 46M) | 328M (encoder 292M, merger 36M) |
+| Patch | 16 pixels, 1152 channels | 16 pixels, 1152 channels | 20 pixels, 1024 channels |
+| 2 x 2 patches become one token by | our average | its patch merger and projector | its patch merger and projector |
+| Token | 32 x 32 pixels, 1152 channels | 32 x 32 pixels, 5120 channels | 40 x 40 pixels, 4608 channels |
+| Resize filter | bilinear | bicubic | bicubic |
+
+**Preprocessing** is the same for the three (`towers.grid_size`, `Tower.encode`). With `stride` the pixels per
+token: rows = round(height / stride), columns = round(width / stride). If rows x columns exceeds the budget, both
+are scaled by sqrt(height x width / (budget x stride²)) and rounded down. The screenshot is resized to
+rows x stride by columns x stride pixels (antialiased) and scaled to [-1, 1]. Nothing is padded or cropped. This is
+the rule of Qwen's own processor; SigLIP2's processor does not align to 32 pixels and Inkling's does not resize, so
+they follow it too, which also makes budgets comparable. At budget 576 a 1920 x 1080 screenshot becomes
+1024 x 576 pixels for `siglip2` and `qwen3.8` and 1280 x 720 for `inkling2`: 32 x 18 = 576 tokens each.
+
+**Weights.** The Qwen and Inkling towers are about 1 GB of checkpoints of 55 GB and 390 GB:
+`towers.checkpoint_tensors` reads only their tensors, with ranged requests. The models are transformers' own
+(`Qwen3_5VisionModel`, `Inkling2VisionModel`, `Siglip2VisionModel`) and run in bfloat16. They need torch 2.6 or newer
+and a transformers build that has Inkling 2 (the commit pinned in `runners/baseten/build_towers.sh`); training needs
+neither.
+
+**Checked once (2026-11-21)** on screenshots of two sizes, in float32: for each tower our tokens have cosine 1.00000
+with transformers' processor and forward pass on the same resized pixels. End to end against Qwen's own processor
+the cosine is 0.9965 to 0.9996: it resizes on the CPU, we on the GPU, and pixels differ by up to 0.10 on the
+[-1, 1] scale. Running a tower in bfloat16 moves its tokens as much (cosine 0.997 to 0.999 against float32).
+
+**Files.** Shard `k` of `n` covers the global steps `[lo, hi)`:
+
+| File | Content |
+|---|---|
+| `tokens_<kk>of<nn>.bin` | [tokens, dim] uint16, the bit patterns of bfloat16 values: the tokens of the shard's steps one after the other, each step's in row-major order |
+| `index_<kk>of<nn>.npy` | [hi - lo, 3] int64: a step's first token, rows, columns |
+| `meta_<kk>of<nn>.json` | `shard`, `num_shards`, `lo`, `hi`, `tower`, `repository`, `budget`, `stride`, `dim`, `tokens`, `missing`; written last |
+| `index_<kk>of<nn>.partial.npy` | the index up to the last checkpoint of a shard that is being written; a rerun continues from it |
+
+**Speed.** Decoding PNGs is the one thing that needs CPUs (9 ms per megapixel and core with torchvision's
+decoder), so it is all the loader workers do. Screenshots of one size are stacked on the GPU, and resizing, scaling,
+cutting into patches and the tower run there in bfloat16. A second thread copies the tokens off the GPU and
+writes them. Each shard's log gives frames per second and the share of time the GPU process waited for screenshots
+and for the disk. On Baseten (`WFEMB_TOWERS="siglip2:576 qwen3.8:576 inkling2:576" WFEMB_GPUS=4 truss train push
+runners/baseten/build_config.py`), four H100s with 14 decoding workers each, writing straight into the team cache:
+
+TOWER_BUILD_TABLE
 
 ## Added datasets
 

@@ -15,7 +15,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-MAX_READ_BYTES = 1 << 20  # larger single reads can livelock the NFS client
+# Larger single reads can livelock the NFS client on rnn; other file systems take more per call.
+MAX_READ_BYTES = int(os.environ.get("WFEMB_MAX_READ_BYTES", 1 << 20))
 
 
 def read_file(path) -> io.BytesIO:

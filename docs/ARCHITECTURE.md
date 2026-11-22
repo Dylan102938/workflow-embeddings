@@ -32,13 +32,16 @@ training sessions of datasets the run does not name are left unused.
 
 **Inputs per step**, all frozen and precomputed:
 
-- *screen tokens* `[n_patches, 512]`: SigLIP2 so400m patch features of the screenshot, pooled to a 16x16, 24x24 or
-  32x32 grid, channel PCA 1152 -> 512, stored as exact bfloat16;
+- *screen tokens*, stored as exact bfloat16. With `tower-siglip2-pca`, `[n_patches, 512]`: SigLIP2 so400m patch
+  features of the screenshot, pooled to a 16x16, 24x24 or 32x32 grid, channel PCA 1152 -> 512. With another
+  `tower`, that tower's own tokens: at most `n_patches` per screenshot, on a grid with the screenshot's aspect
+  ratio, 1152 to 5120 channels ([DATA_PREP.md](DATA_PREP.md#tower-caches-cache_tower_framespy));
 - *events*, up to 8 per step: type, up to two screen points, scroll amount, up to 4 key tokens, and typed text (an
   index into the frozen Qwen3 embeddings of every typed string).
 
-**Batches.** `Batch` holds B sessions padded to T steps; padding repeats a session's last step and is masked by
-`valid`. Training batches (`train_batches`): each epoch the training sessions are shuffled, sorted by length within
+**Batches.** `Batch` holds B sessions padded to T steps; padding is masked by `valid`. The screen tokens of the
+valid steps are one flat array, with each step's grid size next to it, so steps can differ in token count and
+padded steps cost nothing. Training batches (`train_batches`): each epoch the training sessions are shuffled, sorted by length within
 buckets of 50 batches so a batch pads little, and cut into batches of `batch_size` sessions. A batch with more than
 `max_frames_per_batch` sessions x steps is split rather than truncating sessions; split batches count as steps, so an
 epoch has slightly more optimizer steps than sessions / batch_size. Each step but a session's last is dropped with
@@ -56,14 +59,18 @@ At every step the model runs a transformer over one sequence:
 
     [ screen tokens | one token per event | history token ]
 
-- Screen tokens are the projected patch features plus a learned position per patch. In training a random
-  `screen_token_dropout` fraction of them is removed (fewer tokens, not masked ones).
+- Screen tokens are the features through a LayerNorm and a linear projection to `d_model`, plus a position. With
+  `tower-siglip2-pca` the position is a learned vector per grid cell. With a tower's own tokens, grids differ
+  between screenshots, so it is a linear map of Fourier features of the cell's center, (x, y) in [0, 1]: the
+  coordinates event points use. In training a random `screen_token_dropout` fraction of each step's tokens is
+  removed (fewer tokens, not masked ones). Steps are padded to the longest step of the batch and the padding is
+  masked.
 - Each event is its own token (`model/events.py`): the sum of embeddings of its type, points (Fourier features),
   scroll, key tokens and typed text, through a residual MLP, plus a learned position for its order within the step.
   A step without events gets a learned no-event token.
 - The history token carries the state from the previous step. The state after this step is read at its position.
 - Every token gets a learned token-type embedding. There is no causal mask: a step sees only its own screen, its own
-  events and the state. The only masks hide empty event slots.
+  events and the state. The only masks hide empty event slots and screen padding.
 
 The heads map the state to the direction (linear, normalized) and the confidence (softplus, clamped to
 `[confidence_min, confidence_max]`). After a session's last step its state is frozen.
@@ -112,16 +119,19 @@ split every metric is also reported for the sessions without and with an applica
 
 ## Reading the frame cache (`wfemb/storage/frames.py`)
 
-The cache for 24x24 grids is 225 GB (100 GB for 16x16), shared by the runs on a machine and often on NFS. These rules
-were each learned from a stalled or crashed job; changing them needs a test on the cluster:
+The cache for 24x24 grids is 225 GB (100 GB for 16x16), shared by the runs on a machine and often on NFS; a cache of
+a tower's own tokens is 0.5 to 2.5 TB. These rules were each learned from a stalled or crashed job; changing them
+needs a test on the cluster:
 
 - **preadv, not memory maps.** Several long-running multithreaded processes mapping the same file stall on page
   faults (seconds per batch) and after about an hour wedge on the mmap lock.
-- **One read per session, not per frame.** A session's steps are contiguous in the cache. Per-frame reads hand the
-  GIL back and forth with the training thread and were about 50x slower.
+- **One read per run of consecutive steps, not per frame.** A session's steps are contiguous in the cache.
+  Per-frame reads hand the GIL back and forth with the training thread and were about 50x slower. Steps removed by
+  step dropout are not read.
 - **At most 1 MB per read call.** Larger single reads livelocked the NFS client on memory-pressured nodes. The same
-  applies to loading the small arrays (`load_numpy`).
-- **No large per-batch allocations.** Frames are read into a fixed pool of pinned buffers and copied to the GPU
+  applies to loading the small arrays (`load_numpy`). Baseten's file systems take more: `WFEMB_MAX_READ_BYTES`
+  (64 MB in `runners/baseten/train.sh`).
+- **No large per-batch allocations.** Tokens are read into a fixed pool of pinned buffers and copied to the GPU
   synchronously, after which the buffer is reused. Fresh multi-hundred-MB allocations from several threads also
   wedged processes.
 - **Frames stay on the CPU in exact bfloat16.** The cache does not fit on a GPU, and a lossy GPU copy was rejected.

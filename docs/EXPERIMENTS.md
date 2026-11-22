@@ -17,7 +17,8 @@ A run is defined by these variables only (`config.Experiment`). Each has a short
 | `nh` | `n_heads` | `8` | attention heads per block |
 | `drop` | `dropout` | `0.3` | dropout on attention and MLP outputs and on the state |
 | `smooth` | `label_smoothing` | `0.2` | share of the target probability spread over similar instructions (training only) |
-| `patch` | `n_patches` | `576` | screen tokens per frame: 256 (16x16 grid), 576 (24x24) or 1024 (32x32) |
+| `tower` | `tower` | `siglip2-pca` | the frozen vision tower and how its features become screen tokens. `siglip2-pca`: SigLIP2 pooled to a square grid and PCA-projected to 512 channels. `siglip2`, `qwen3.8`, `inkling2`: the tower's own tokens on its own grid, no pooling to a square and no PCA ([DATA_PREP.md](DATA_PREP.md#tower-caches-cache_tower_framespy)) (added 2026-11-21) |
+| `patch` | `n_patches` | `576` | screen tokens per frame. `siglip2-pca`: 256 (16x16 grid), 576 (24x24) or 1024 (32x32). A tower's own tokens: the most per frame; a screenshot gets as many as its resized grid has |
 | `lr` | `learning_rate` | `5e-4` | peak learning rate |
 | `bs` | `batch_size` | `64` | sessions per batch |
 | `ep` | `n_epochs` | `45` | passes over the training sessions |
@@ -54,11 +55,11 @@ again, together with its code and the results that used it: delete the field and
 kept run had in `config.REMOVED_VARIABLES` (ids and result folders written with that value are still read), and run
 `migrate`, which also deletes the runs that had another value. Removed so far: turning the near-duplicate mask off,
 separate Q/K/V projections per token type, and `pca` (screen features without the PCA projection to 512 channels:
-worse on validation at 2.25 times the cache size). Added after the original thirteen: `data`.
+worse on validation at 2.25 times the cache size). Added after the original thirteen: `data`, `tower`.
 
-`patch` chooses the frame cache, `frames_dense[_g<grid>]` (`Experiment.frame_cache_name`); a new grid needs its
-cache built first ([DATA_PREP.md](DATA_PREP.md)). A run with added datasets also needs that
-cache for the added set (`BULK/added/`).
+`tower` and `patch` choose the frame cache (`Experiment.frame_cache_name`): `frames_dense[_g<grid>]` for
+`siglip2-pca`, `frames_<tower>_p<patch>` for a tower's own tokens. A new combination needs its cache built first
+([DATA_PREP.md](DATA_PREP.md)). A run with added datasets also needs that cache for the added set (`BULK/added/`).
 
 `data` changes the training sessions and the training candidates only. `ep` counts passes over the run's own
 training sessions, so a run with more data takes more optimizer steps. Evaluation always scores against AgentNet's
@@ -76,14 +77,14 @@ python -m wfemb.config id=<run id>                                     # canonic
 
 ## Run ids
 
-`arch-<v>_dm-<v>_dh-<v>_nl-<v>_nh-<v>_drop-<v>_smooth-<v>_patch-<v>_lr-<v>_bs-<v>_ep-<v>_beta-<v>_data-<v>_seed-<v>`
+`arch-<v>_dm-<v>_dh-<v>_nl-<v>_nh-<v>_drop-<v>_smooth-<v>_tower-<v>_patch-<v>_lr-<v>_bs-<v>_ep-<v>_beta-<v>_data-<v>_seed-<v>`
 
 Values never contain `_`; a key is everything before the first `-` of a segment. Numbers are canonical: integers as
 integers (`beta-0`, `beta-2`), floats below 0.01 in short scientific form (`lr-5e-4`, `lr-1.5e-3`), other floats with
 `%g` (`drop-0.3`). `wfemb.config.Experiment.id` / `Experiment.from_id` round-trip exactly; an id written before a variable was added
 is read with that variable's default. The best model so far is
 
-`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-all_seed-0`
+`arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2_tower-siglip2-pca_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-all_seed-0`
 
 Results are always reported and named with these ids.
 
@@ -91,7 +92,7 @@ Results are always reported and named with these ids.
 
 Every run writes raw data only (no summaries; the dashboard computes those) to
 `<results root>/<one folder per id segment>/`, e.g.
-`results/arch-late-history-transf/dm-512/dh-64/nl-4/nh-8/drop-0.3/smooth-0.2/patch-576/lr-5e-4/bs-64/ep-45/beta-0/data-agentnet/seed-0/`:
+`results/arch-late-history-transf/dm-512/dh-64/nl-4/nh-8/drop-0.3/smooth-0.2/tower-siglip2-pca/patch-576/lr-5e-4/bs-64/ep-45/beta-0/data-agentnet/seed-0/`:
 
 | file | kind | content |
 |---|---|---|

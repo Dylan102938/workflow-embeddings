@@ -20,6 +20,9 @@ if grep -q "^added/" <<< "$CACHES"; then                       # some run trains
     mkdir -p "$WFEMB_DATA/added"; cp -r "$TEAM"/data/added/{prepared,keys,keys_openai} "$WFEMB_DATA/added/"
 fi
 for n in $CACHES; do
+    if [[ $n != *frames_dense* ]]; then                        # a tower's own tokens: read in the team cache
+        mkdir -p "$(dirname "$WFEMB_BULK/$n")"; ln -sfn "$TEAM/bulk/$n" "$WFEMB_BULK/$n"; continue
+    fi
     mkdir -p "$WFEMB_BULK/$n"                                  # the frame caches the runs need, to local NVMe
     for f in "$TEAM/bulk/$n"/*; do cp "$f" "$WFEMB_BULK/$n/" & done; wait
     for f in "$WFEMB_BULK/$n"/*.npy; do cat "$f" > /dev/null & done; wait          # into the page cache

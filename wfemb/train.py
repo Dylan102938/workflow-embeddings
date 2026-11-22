@@ -52,7 +52,7 @@ def training_step(
     wordings = candidates.sample_wordings()
 
     state.model.train()
-    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=batch.frames.is_cuda):
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=batch.valid.is_cuda):
         directions, confidences = state.model(batch)
     logits = metrics.candidate_logits(directions, confidences, wordings, mask)
 

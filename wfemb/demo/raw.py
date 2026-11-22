@@ -9,6 +9,7 @@ import base64
 import contextlib
 import functools
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -203,7 +204,8 @@ def embed_workflow(
 
     batch = Batch(
         session_indices=torch.zeros(1, dtype=torch.long),
-        frames=torch.from_numpy(frames.view(np.int16)[None]).to(device).view(torch.bfloat16),
+        screen_tokens=torch.from_numpy(frames.view(np.int16)).to(device).view(torch.bfloat16).flatten(0, 1),
+        screen_grids=torch.full((1, n_steps, 2), math.isqrt(frames.shape[1]), device=device),
         event_types=one_session(events.types, np.int64),
         event_points=one_session(events.points, np.float32),
         event_scrolls=one_session(events.scrolls, np.float32),

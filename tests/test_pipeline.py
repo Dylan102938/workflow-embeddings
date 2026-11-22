@@ -24,7 +24,7 @@ from wfemb.config import (
 
 BEST = (
     "arch-late-history-transf_dm-512_dh-64_nl-4_nh-8_drop-0.3_smooth-0.2"
-    "_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-agentnet_seed-0"
+    "_tower-siglip2-pca_patch-576_lr-5e-4_bs-64_ep-45_beta-0_data-agentnet_seed-0"
 )
 SMALL = dict(d_model=64, d_head=16, n_heads=4, n_layers=2, n_patches=16, batch_size=16, n_epochs=2, learning_rate=1e-3)
 
@@ -37,6 +37,7 @@ def test_ids_round_trip():
         Experiment(architecture="gru", learning_rate=3e-4, dropout=0.1, n_patches=256),
         Experiment(learning_rate=1.5e-3, label_smoothing=0.0, n_layers=6),
         Experiment(n_patches=1024, training_data="all"),
+        Experiment(tower="qwen3.8", n_patches=600),
     ]
     for experiment in experiments:
         assert Experiment.from_id(experiment.id) == experiment
@@ -44,14 +45,16 @@ def test_ids_round_trip():
     assert [format_id_value(v) for v in (5e-4, 1.5e-3, 0.3, 2.0, 0.0)] == ["5e-4", "1.5e-3", "0.3", "2", "0"]
 
 
-@pytest.mark.parametrize("bad_id", ["arch-foo", "dm512", "arch-gru_nl-1", "patch-300", "qkv-shared_seed-0"])
+@pytest.mark.parametrize(
+    "bad_id", ["arch-foo", "dm512", "arch-gru_nl-1", "patch-300", "qkv-shared_seed-0", "tower-qwen2.5"]
+)
 def test_bad_ids_are_rejected(bad_id):
     with pytest.raises(ValueError):
         Experiment.from_id(bad_id)
 
 
 def test_ids_without_a_later_variable_take_its_default():
-    assert Experiment.from_id(BEST.replace("_data-agentnet", "")) == Experiment()
+    assert Experiment.from_id(BEST.replace("_data-agentnet", "").replace("_tower-siglip2-pca", "")) == Experiment()
 
 
 def test_a_removed_variable_is_read_only_at_the_value_that_was_kept():
@@ -69,6 +72,7 @@ def test_frame_cache_names():
     names = {256: "frames_dense", 576: "frames_dense_g24", 1024: "frames_dense_g32"}
     for n_patches, name in names.items():
         assert Experiment(n_patches=n_patches).frame_cache_name == name
+    assert Experiment(tower="inkling2", n_patches=576).frame_cache_name == "frames_inkling2_p576"
 
 
 def test_command_line_accepts_an_id_and_overrides():
@@ -84,12 +88,39 @@ def data_config(tmp_path_factory) -> DataConfig:
     return DataConfig(root=str(root), bulk_root=str(root / "bulk"))
 
 
-@pytest.mark.parametrize("architecture,beta", [("late-history-transf", 2.0), ("transf", 0.0), ("gru", 0.0)])
-def test_training_writes_the_results_files(data_config, tmp_path, architecture, beta):
+def test_a_tower_cache_holds_each_step_on_its_own_grid(data_config):
+    from make_synthetic import TOWER_GRIDS
+
+    from wfemb.data import WorkflowDataset
+
+    pooled = WorkflowDataset(data_config, Experiment(**SMALL)).frames
+    dataset = WorkflowDataset(data_config, Experiment(tower="siglip2", **SMALL))
+    steps = np.array([5, 6, 7, 40, dataset.frames.n_steps // 2 - 1, dataset.frames.n_steps // 2, 9])
+    grids = [TOWER_GRIDS[step % 3] for step in steps]
+    assert dataset.frames.grids[steps].tolist() == [list(grid) for grid in grids]
+    square = pooled.read(steps).reshape(len(steps), 16, -1)
+    expected = np.concatenate([tokens[: rows * columns] for tokens, (rows, columns) in zip(square, grids)])
+    assert np.array_equal(dataset.frames.read(steps), expected)
+
+    batch = dataset.make_batch(np.array([3, 4]))
+    assert batch.screen_grids.prod(-1).sum() == len(batch.screen_tokens)
+    assert ((batch.screen_grids.prod(-1) > 0) == batch.valid).all()
+
+
+@pytest.mark.parametrize(
+    "architecture,beta,tower",
+    [
+        ("late-history-transf", 2.0, "siglip2-pca"),
+        ("transf", 0.0, "siglip2-pca"),
+        ("gru", 0.0, "siglip2-pca"),
+        ("late-history-transf", 0.0, "siglip2"),
+    ],
+)
+def test_training_writes_the_results_files(data_config, tmp_path, architecture, beta, tower):
     from wfemb.data import WorkflowDataset
     from wfemb.train import training_loop
 
-    experiment = Experiment(architecture=architecture, hard_negative_beta=beta, **SMALL)
+    experiment = Experiment(architecture=architecture, hard_negative_beta=beta, tower=tower, **SMALL)
     config = RunConfig(
         experiment=experiment,
         train=TrainConfig(max_steps=24, warmup_steps=5),

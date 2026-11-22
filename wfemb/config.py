@@ -17,6 +17,8 @@ from .storage.paths import ADDED, ADDED_DATASETS, AGENTNET
 
 REPO = Path(__file__).resolve().parent.parent
 ARCHITECTURES = ("transf", "late-history-transf", "gru")
+POOLED_TOWER = "siglip2-pca"  # SigLIP2 pooled to a square grid and PCA-projected (cache_frames.py)
+NATIVE_TOWERS = ("siglip2", "qwen3.8", "inkling2")  # a tower's own tokens on its own grid (cache_tower_frames.py)
 
 # Variables that were removed again: id key -> (field, the value every kept run had). Ids, result folders and
 # config.json files written while the variable existed are still read if they have that value.
@@ -31,6 +33,7 @@ ID_KEYS = {
     "nh": "n_heads",
     "drop": "dropout",
     "smooth": "label_smoothing",
+    "tower": "tower",
     "patch": "n_patches",
     "lr": "learning_rate",
     "bs": "batch_size",
@@ -52,7 +55,8 @@ class Experiment:
     n_heads: int = 8
     dropout: float = 0.3
     label_smoothing: float = 0.2
-    n_patches: int = 576
+    tower: str = POOLED_TOWER
+    n_patches: int = 576  # screen tokens per frame; with a tower's own tokens, the most per frame
     learning_rate: float = 5e-4
     batch_size: int = 64
     n_epochs: int = 45
@@ -66,7 +70,9 @@ class Experiment:
             raise ValueError(f"architecture must be one of {ARCHITECTURES}, got {self.architecture!r}")
         if self.architecture != "transf" and self.n_layers < 2:
             raise ValueError(f"architecture {self.architecture} needs n_layers >= 2")
-        if math.isqrt(self.n_patches) ** 2 != self.n_patches:
+        if self.tower not in (POOLED_TOWER, *NATIVE_TOWERS):
+            raise ValueError(f"tower must be one of {(POOLED_TOWER, *NATIVE_TOWERS)}, got {self.tower!r}")
+        if self.tower == POOLED_TOWER and math.isqrt(self.n_patches) ** 2 != self.n_patches:
             raise ValueError(f"n_patches must be a square number (256, 576, ...), got {self.n_patches}")
         unknown = set(self.training_datasets) - {AGENTNET, *ADDED_DATASETS}
         if unknown or self.training_datasets[0] != AGENTNET:
@@ -124,11 +130,17 @@ class Experiment:
 
     @property
     def frame_cache_name(self) -> str:
-        return frame_cache_name(self.patch_grid_size)
+        if self.tower == POOLED_TOWER:
+            return frame_cache_name(self.patch_grid_size)
+        return tower_frame_cache_name(self.tower, self.n_patches)
 
 
 def frame_cache_name(grid_size: int) -> str:
     return "frames_dense" if grid_size == 16 else f"frames_dense_g{grid_size}"
+
+
+def tower_frame_cache_name(tower: str, budget: int) -> str:
+    return f"frames_{tower}_p{budget}"
 
 
 def format_id_value(value) -> str:

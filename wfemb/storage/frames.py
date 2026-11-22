@@ -10,7 +10,6 @@ import io
 import json
 import os
 import queue
-import threading
 from pathlib import Path
 
 import numpy as np
@@ -39,29 +38,18 @@ def load_numpy(path):
     return np.load(read_file(path))
 
 
-class NpyRows:
-    """Row-range reads from a .npy file with preadv (no memory map). Safe to share between threads."""
+class TokenFile:
+    """Token-range reads from a file of [n_tokens, dim] uint16 with preadv (no memory map). Safe to share between
+    threads."""
 
-    def __init__(self, path):
-        with open(path, "rb") as file:
-            version = np.lib.format.read_magic(file)
-            read_header = (
-                np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
-            )
-            shape, fortran_order, dtype = read_header(file)
-            assert not fortran_order, path
-            self.data_offset = file.tell()
+    def __init__(self, path, dim: int, data_offset: int = 0):
         self.file_descriptor = os.open(path, os.O_RDONLY)
-        self.shape, self.dtype = shape, np.dtype(dtype)
-        self.row_bytes = int(np.prod(shape[1:])) * self.dtype.itemsize
+        self.token_bytes, self.data_offset = 2 * dim, data_offset
 
-    def __len__(self):
-        return self.shape[0]
-
-    def read_into(self, out: np.ndarray, first_row: int):
-        """Fills `out` (contiguous) with the rows starting at first_row."""
+    def read_into(self, out: np.ndarray, first_token: int):
+        """Fills `out` (contiguous) with the tokens starting at first_token."""
         view = memoryview(out).cast("B")
-        offset = self.data_offset + first_row * self.row_bytes
+        offset = self.data_offset + first_token * self.token_bytes
         done = 0
         while done < len(view):
             count = os.preadv(self.file_descriptor, [view[done : done + MAX_READ_BYTES]], offset + done)
@@ -70,11 +58,21 @@ class NpyRows:
             done += count
 
 
-class FrameStore:
-    """Screen tokens of every step, [n_steps, n_patches, dim] as bfloat16 bits, addressed by global step index.
+def npy_data_offset(path) -> int:
+    with open(path, "rb") as file:
+        version = np.lib.format.read_magic(file)
+        read_header = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
+        read_header(file)
+        return file.tell()
 
-    A cache folder holds shards: global_<tag>.npy and meta_<tag>.json with the shard's step range [lo, hi).
-    caches: (folder, global index of the folder's first step) pairs.
+
+class FrameStore:
+    """Screen tokens of every step, as bfloat16 bits, addressed by global step index.
+
+    Step s has token_counts[s] tokens of `dim` channels, in row-major order on a grid of grids[s] = (rows, columns).
+    A cache folder holds shards; meta_<tag>.json gives a shard's step range [lo, hi). Two formats (docs/DATA_PREP.md):
+    a square grid for every step (global_<tag>.npy), or a tower's own grid per step (tokens_<tag>.bin and
+    index_<tag>.npy). caches: (folder, global index of the folder's first step) pairs.
     """
 
     def __init__(self, caches: list[tuple[Path, int]]):
@@ -87,58 +85,90 @@ class FrameStore:
             for meta_path in meta_paths:
                 meta = json.load(open(meta_path))
                 tag = Path(meta_path).stem.split("_", 1)[1]
-                rows = NpyRows(cache_dir / f"global_{tag}.npy")
-                shards.append((first_step + meta["lo"], first_step + meta["hi"], rows))
-        self.shards = sorted(shards, key=lambda shard: shard[0])
-        self.shard_ends = np.array([end for _, end, _ in self.shards])
-        self.n_steps = int(self.shard_ends.max())
-        self.dim, self.n_patches = meta["dim"], meta["global_tokens"]
-        self._thread_local = threading.local()
-
-    def read_into(self, step_indices: np.ndarray, out: np.ndarray, max_gap: int = 8) -> np.ndarray:
-        """Fills out[:len(step_indices)] without allocating.
-
-        Each run of increasing indices (one session's steps) is a single span read. Repeated indices (padding
-        repeats a session's last step) are copied from the previous row.
-        """
-        indices = np.asarray(step_indices, np.int64)
-        is_repeat = np.r_[False, indices[1:] == indices[:-1]]
-        positions = np.nonzero(~is_repeat)[0]
-        if len(positions):
-            steps = indices[positions]
-            shard_of = np.searchsorted(self.shard_ends, steps, side="right")
-            step_gaps = np.diff(steps)
-            run_breaks = (
-                np.nonzero(
-                    (np.diff(positions) != 1) | (step_gaps < 1) | (step_gaps > max_gap) | (np.diff(shard_of) != 0)
-                )[0]
-                + 1
-            )
-            for start, end in zip(np.r_[0, run_breaks], np.r_[run_breaks, len(positions)]):
-                shard_start, _, rows = self.shards[shard_of[start]]
-                first_step, last_step = int(steps[start]), int(steps[end - 1])
-                target = out[int(positions[start]) : int(positions[end - 1]) + 1]
-                span = last_step - first_step + 1
-                if span == end - start:
-                    rows.read_into(target, first_step - shard_start)
+                n_steps = meta["hi"] - meta["lo"]
+                if "tower" in meta:
+                    index = load_numpy(cache_dir / f"index_{tag}.npy")
+                    file = TokenFile(cache_dir / f"tokens_{tag}.bin", meta["dim"])
+                    first_tokens, grids = index[:, 0], index[:, 1:]
                 else:
-                    scratch = self._scratch(span)
-                    rows.read_into(scratch[:span], first_step - shard_start)
-                    np.take(scratch, steps[start:end] - first_step, axis=0, out=target)
-        if is_repeat.any():
-            source = np.maximum.accumulate(np.where(is_repeat, 0, np.arange(len(indices))))
-            out[is_repeat] = out[source[is_repeat]]
+                    tokens_path = cache_dir / f"global_{tag}.npy"
+                    file = TokenFile(tokens_path, meta["dim"], npy_data_offset(tokens_path))
+                    first_tokens = np.arange(n_steps) * meta["global_tokens"]
+                    grids = np.full((n_steps, 2), meta["grid"])
+                shards.append((first_step + meta["lo"], file, first_tokens, grids))
+        shards.sort(key=lambda shard: shard[0])
+        self.files = [file for _, file, _, _ in shards]
+        self.first_tokens = np.concatenate([first_tokens for _, _, first_tokens, _ in shards]).astype(np.int64)
+        self.grids = np.concatenate([grids for _, _, _, grids in shards]).astype(np.int64)
+        self.shard_of_step = np.repeat(np.arange(len(shards)), [len(grids) for _, _, _, grids in shards])
+        if [first for first, _, _, _ in shards] != [0, *np.cumsum([len(shard[3]) for shard in shards])[:-1]]:
+            raise ValueError(f"the shards of {caches} do not cover every step once")
+        self.token_counts = self.grids.prod(1)
+        self.n_steps, self.dim, self.max_tokens = len(self.grids), meta["dim"], int(self.token_counts.max())
+
+    def read_into(self, steps: np.ndarray, out: np.ndarray) -> int:
+        """Fills out[:n] with the tokens of the given steps, in that order, and returns n.
+
+        Consecutive steps of a shard are one span read.
+        """
+        steps = np.asarray(steps, np.int64)
+        if not len(steps):
+            return 0
+        ends = self.token_counts[steps].cumsum()
+        starts = ends - self.token_counts[steps]
+        shards = self.shard_of_step[steps]
+        run_breaks = np.nonzero((np.diff(steps) != 1) | (np.diff(shards) != 0))[0] + 1
+        for first, end in zip(np.r_[0, run_breaks], np.r_[run_breaks, len(steps)]):
+            target = out[starts[first] : ends[end - 1]]
+            self.files[shards[first]].read_into(target, int(self.first_tokens[steps[first]]))
+        return int(ends[-1])
+
+    def read(self, steps: np.ndarray) -> np.ndarray:
+        out = np.empty((int(self.token_counts[np.asarray(steps, np.int64)].sum()), self.dim), np.uint16)
+        self.read_into(steps, out)
         return out
 
-    def read(self, step_indices: np.ndarray) -> np.ndarray:
-        return self.read_into(step_indices, np.empty((len(step_indices), self.n_patches, self.dim), np.uint16))
 
-    def _scratch(self, n_rows: int) -> np.ndarray:
-        scratch = getattr(self._thread_local, "scratch", None)
-        if scratch is None or len(scratch) < n_rows:
-            scratch = np.empty((max(n_rows, 512), self.n_patches, self.dim), np.uint16)
-            self._thread_local.scratch = scratch
-        return scratch
+class TokenShardWriter:
+    """Writes one shard of a tower's own tokens: append() the steps in order, then finish().
+
+    checkpoint() makes what was appended so far durable; a writer opened on an interrupted shard continues after
+    its last checkpoint (n_steps says where). The meta file marks the shard complete, so it is written last.
+    """
+
+    def __init__(self, cache_dir: Path, tag: str, dim: int):
+        self.cache_dir, self.tag, self.dim = Path(cache_dir), tag, dim
+        self.partial_index_path = self.cache_dir / f"index_{tag}.partial.npy"
+        tokens_path = self.cache_dir / f"tokens_{tag}.bin"
+        resumed = self.partial_index_path.exists() and tokens_path.exists()
+        self.index = [tuple(row) for row in np.load(self.partial_index_path)] if resumed else []
+        self.n_tokens = sum(rows * columns for _, rows, columns in self.index)
+        self.file = open(tokens_path, "r+b" if resumed else "wb")
+        self.file.truncate(self.n_tokens * 2 * dim)
+        self.file.seek(self.n_tokens * 2 * dim)
+
+    @property
+    def n_steps(self) -> int:
+        return len(self.index)
+
+    def append(self, tokens: np.ndarray, grids: list[tuple[int, int]]):
+        """tokens: [n, dim] uint16, the tokens of len(grids) steps one after the other."""
+        for rows, columns in grids:
+            self.index.append((self.n_tokens, rows, columns))
+            self.n_tokens += rows * columns
+        self.file.write(memoryview(np.ascontiguousarray(tokens)))
+
+    def checkpoint(self):
+        self.file.flush()
+        os.fsync(self.file.fileno())
+        np.save(self.partial_index_path, np.array(self.index, np.int64).reshape(-1, 3))
+
+    def finish(self, meta: dict):
+        self.checkpoint()
+        self.file.close()
+        self.partial_index_path.rename(self.cache_dir / f"index_{self.tag}.npy")
+        meta = {**meta, "dim": self.dim, "tokens": self.n_tokens}
+        (self.cache_dir / f"meta_{self.tag}.json").write_text(json.dumps(meta))
 
 
 def as_bfloat16(bits: np.ndarray) -> torch.Tensor:
@@ -147,13 +177,12 @@ def as_bfloat16(bits: np.ndarray) -> torch.Tensor:
 
 
 class PinnedBufferPool:
-    """A fixed set of pinned host buffers for frame tokens, allocated once and reused for every batch."""
+    """A fixed set of pinned host buffers for screen tokens, allocated once and reused for every batch."""
 
-    def __init__(self, n_buffers: int, n_rows: int, n_patches: int, dim: int):
-        self.n_rows = n_rows
+    def __init__(self, n_buffers: int, n_tokens: int, dim: int):
         self._free = queue.Queue()
         for _ in range(n_buffers):
-            self._free.put(torch.empty((n_rows, n_patches, dim), dtype=torch.int16).pin_memory())
+            self._free.put(torch.empty((n_tokens, dim), dtype=torch.int16).pin_memory())
 
     def take(self) -> torch.Tensor:
         return self._free.get()
@@ -165,9 +194,9 @@ class PinnedBufferPool:
 _pools: dict = {}
 
 
-def pinned_buffer_pool(n_buffers: int, n_rows: int, n_patches: int, dim: int) -> PinnedBufferPool:
+def pinned_buffer_pool(n_buffers: int, n_tokens: int, dim: int) -> PinnedBufferPool:
     """One pool per shape for the whole process: pinned memory is never returned to the system."""
-    key = (n_buffers, n_rows, n_patches, dim)
+    key = (n_buffers, n_tokens, dim)
     if key not in _pools:
         _pools[key] = PinnedBufferPool(*key)
     return _pools[key]

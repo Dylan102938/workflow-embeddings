@@ -31,10 +31,12 @@ EVENT_ARRAYS = {
 
 @dataclass
 class Batch:
-    """B sessions padded to T steps; E event slots per step. Padding repeats a session's last step."""
+    """B sessions padded to T steps; E event slots per step. A padded step repeats the events of the session's
+    last step and has no screen tokens."""
 
     session_indices: torch.Tensor  # [B]
-    frames: torch.Tensor  # [B, T, n_patches, 512] bfloat16
+    screen_tokens: torch.Tensor  # [N, d_screen] bfloat16: the tokens of every valid step, session after session
+    screen_grids: torch.Tensor  # [B, T, 2] rows and columns of each step's token grid; 0 for a padded step
     event_types: torch.Tensor  # [B, T, E], 0 = empty slot
     event_points: torch.Tensor  # [B, T, E, 4] (x, y, x2, y2), nan = absent
     event_scrolls: torch.Tensor  # [B, T, E]
@@ -111,7 +113,7 @@ def stack(first: PreparedSet, second: PreparedSet) -> PreparedSet:
 
 
 class WorkflowDataset:
-    """Every session's metadata, events and frozen label keys in memory; screen features read per batch.
+    """Every session's metadata, events and frozen label keys in memory; screen tokens read per batch.
 
     Session s owns steps step_offsets[s] .. step_offsets[s] + lengths[s] - 1 of the event arrays and frame cache.
     AgentNet's sessions come first; the added datasets' follow when the experiment trains on any of them.
@@ -146,9 +148,9 @@ class WorkflowDataset:
         self.has_training_app = np.array([bool(training_apps & set(s["app_keys"])) for s in self.sessions])
 
         self.frames = FrameStore(frame_caches)
-        if self.frames.n_patches != experiment.n_patches:
+        if self.frames.max_tokens > experiment.n_patches:
             raise ValueError(
-                f"{frame_caches[0][0]} has {self.frames.n_patches} patches per frame, not {experiment.n_patches}"
+                f"{frame_caches[0][0]} has up to {self.frames.max_tokens} tokens per frame, not {experiment.n_patches}"
             )
         if self.frames.n_steps != prepared.n_steps:
             raise ValueError(f"the frame caches {frame_caches} do not match the prepared events")
@@ -195,18 +197,21 @@ class WorkflowDataset:
         seed: int | None = None,
         frame_buffer: torch.Tensor | None = None,
     ) -> Batch:
-        """A batch on the CPU. frame_buffer: a reusable int16 buffer the frames are read into if it is large enough."""
+        """A batch on the CPU. frame_buffer: a reusable int16 buffer the tokens are read into if it is large enough."""
         steps, lengths = self.padded_steps(session_indices, step_dropout, seed)
         batch_shape = steps.shape
         flat_steps = steps.reshape(-1)
+        valid = np.arange(batch_shape[1])[None, :] < lengths[:, None]
+        valid_steps = steps[valid]
 
-        frame_shape = (*batch_shape, self.frames.n_patches, self.frames.dim)
-        if frame_buffer is not None and len(flat_steps) <= len(frame_buffer):
-            used = frame_buffer[: len(flat_steps)]
-            self.frames.read_into(flat_steps, used.numpy().view(np.uint16))
-            frames = used.view(torch.bfloat16).view(frame_shape)
+        n_tokens = int(self.frames.token_counts[valid_steps].sum())
+        if frame_buffer is not None and n_tokens <= len(frame_buffer):
+            self.frames.read_into(valid_steps, frame_buffer.numpy().view(np.uint16))
+            screen_tokens = frame_buffer[:n_tokens].view(torch.bfloat16)
         else:
-            frames = as_bfloat16(self.frames.read(flat_steps)).view(frame_shape)
+            screen_tokens = as_bfloat16(self.frames.read(valid_steps))
+        screen_grids = np.zeros((*batch_shape, 2), np.int64)
+        screen_grids[valid] = self.frames.grids[valid_steps]
 
         event_tensors = {}
         for field, (array_name, dtype) in EVENT_ARRAYS.items():
@@ -217,8 +222,9 @@ class WorkflowDataset:
 
         return Batch(
             session_indices=torch.from_numpy(np.asarray(session_indices, np.int64)),
-            frames=frames,
-            valid=torch.from_numpy(np.arange(batch_shape[1])[None, :] < lengths[:, None]),
+            screen_tokens=screen_tokens,
+            screen_grids=torch.from_numpy(screen_grids),
+            valid=torch.from_numpy(valid),
             lengths=torch.from_numpy(lengths),
             **event_tensors,
         )
@@ -303,8 +309,8 @@ def length_bucketed_batches(
 class Prefetcher:
     """Builds batches on background threads, in order, and moves them to the device.
 
-    Frames are read into pinned buffers from a fixed pool and copied to the GPU synchronously, so each buffer
-    can be reused right away.
+    Screen tokens are read into pinned buffers from a fixed pool and copied to the GPU synchronously, so each
+    buffer can be reused right away.
     """
 
     def __init__(
@@ -316,26 +322,27 @@ class Prefetcher:
         seed: int = 0,
         depth: int = 4,
         threads: int = 4,
-        buffer_rows: int = 4096,
+        buffer_frames: int = 4096,
     ):
         self.dataset, self.batches, self.device = dataset, batches, device
         self.step_dropout, self.seed, self.depth = step_dropout, seed, depth
         self.executor = ThreadPoolExecutor(threads)
         self.buffers = None
         if device.type == "cuda":
-            self.buffers = pinned_buffer_pool(depth + 1, buffer_rows, dataset.frames.n_patches, dataset.frames.dim)
+            buffer_tokens = buffer_frames * dataset.frames.max_tokens
+            self.buffers = pinned_buffer_pool(depth + 1, buffer_tokens, dataset.frames.dim)
 
     def _build(self, index: int) -> tuple[Batch, torch.Tensor | None]:
         buffer = self.buffers.take() if self.buffers is not None else None
         batch = self.dataset.make_batch(
             self.batches[index], self.step_dropout, self.seed * 1_000_003 + index, frame_buffer=buffer
         )
-        if buffer is not None and batch.frames.data_ptr() != buffer.data_ptr():  # the batch did not fit
+        if buffer is not None and batch.screen_tokens.data_ptr() != buffer.data_ptr():  # the batch did not fit
             self.buffers.give_back(buffer)
             buffer = None
         if self.buffers is not None:
             for field in fields(batch):
-                if not (field.name == "frames" and buffer is not None):
+                if not (field.name == "screen_tokens" and buffer is not None):
                     setattr(batch, field.name, getattr(batch, field.name).pin_memory())
         return batch, buffer
 
@@ -343,7 +350,7 @@ class Prefetcher:
         on_device = {}
         for field in fields(batch):
             # A pool buffer is reused as soon as it is given back, so its copy must have finished.
-            in_pool_buffer = field.name == "frames" and buffer is not None
+            in_pool_buffer = field.name == "screen_tokens" and buffer is not None
             on_device[field.name] = getattr(batch, field.name).to(self.device, non_blocking=not in_pool_buffer)
         if buffer is not None:
             self.buffers.give_back(buffer)
@@ -394,7 +401,7 @@ def train_batches(
             seed=experiment.seed * 1000 + epoch,
             depth=data.prefetch_depth,
             threads=data.prefetch_threads,
-            buffer_rows=train.max_frames_per_batch,
+            buffer_frames=train.max_frames_per_batch,
         )
     )
 
@@ -412,4 +419,4 @@ def eval_batches(
         drop_last=False,
     )
     # depth 1: its own small pool, since validation runs while the training prefetcher holds its buffers
-    return iter(Prefetcher(dataset, batches, device, depth=1, threads=threads, buffer_rows=max_frames))
+    return iter(Prefetcher(dataset, batches, device, depth=1, threads=threads, buffer_frames=max_frames))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from ..config import NATIVE_TOWERS
 from .transformer import ModelConfig, WorkflowTransformer
 
 
@@ -18,7 +19,8 @@ def model_config(experiment, train, dataset) -> ModelConfig:
         dropout=experiment.dropout,
         d_label=dataset.label_keys.shape[1],
         d_screen=dataset.frames.dim,
-        n_patches=dataset.frames.n_patches,
+        n_patches=dataset.frames.max_tokens,
+        coordinate_positions=experiment.tower in NATIVE_TOWERS,
         n_key_tokens=dataset.n_key_tokens,
         d_text=dataset.text_embeddings.shape[1],
         max_events=dataset.max_events,

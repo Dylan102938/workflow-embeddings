@@ -13,8 +13,10 @@ import numpy as np
 import torch
 
 from wfemb.config import ADDED_DATASETS
+from wfemb.storage.frames import TokenShardWriter
 
 N_PATCHES, D_SCREEN, D_LABEL = 16, 32, 64
+TOWER_GRIDS = ((4, 4), (3, 5), (2, 6))
 MAX_EVENTS, MAX_KEYS, N_TEXTS, N_INTENTS, N_APPS = 8, 4, 50, 40, 7
 
 
@@ -136,6 +138,14 @@ def write_prepared_set(root: Path, frames_dir: Path, n_sessions: int, seed: int,
             {"lo": start, "hi": end, "dim": D_SCREEN, "global_tokens": N_PATCHES, "grid": 4},
             open(frames_dir / f"meta_{tag}.json", "w"),
         )
+    tower_dir = frames_dir.parent / "frames_siglip2_p16"  # the same frames as a tower's own tokens: 16, 15 or 12
+    tower_dir.mkdir(parents=True, exist_ok=True)
+    for tag, start, end in (("00of02", 0, middle), ("01of02", middle, n_steps)):
+        writer = TokenShardWriter(tower_dir, tag, D_SCREEN)
+        for step in range(start, end):
+            rows, columns = TOWER_GRIDS[step % len(TOWER_GRIDS)]
+            writer.append(bfloat16_bits(frames[step, : rows * columns]), [(rows, columns)])
+        writer.finish({"lo": start, "hi": end, "tower": "siglip2"})
     print(f"synthetic data: {n_sessions} sessions, {n_steps} steps")
 
 

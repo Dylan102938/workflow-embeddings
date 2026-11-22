@@ -13,10 +13,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from .events import EventEncoder
+from .events import EventEncoder, FourierFeatures
 from .gru import GRUHead
 
 SCREEN, EVENT, HISTORY = 0, 1, 2  # rows of the token-type embedding
+COORDINATE_FREQUENCIES = 8
+SCREEN_PROJECTION_CHUNK = 1 << 16  # tokens normalized and projected at once (the norm works on a float32 copy)
 
 
 @dataclass
@@ -29,7 +31,7 @@ class ModelConfig:
     dropout: float
     d_label: int  # dimension of the frozen instruction keys
     d_screen: int  # dimension of the frozen screen features
-    n_patches: int
+    n_patches: int  # most screen tokens per step
     n_key_tokens: int
     d_text: int  # dimension of the frozen typed-text embeddings
     max_events: int  # event slots per step
@@ -39,6 +41,7 @@ class ModelConfig:
     confidence_max: float = 50.0
     confidence_init: float = 5.0
     activation_checkpointing: bool = True
+    coordinate_positions: bool = False  # screen positions from grid coordinates instead of a table per token index
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,7 +102,11 @@ class WorkflowTransformer(nn.Module):
         self.event_positions = nn.Parameter(torch.randn(config.max_events, d_model) * 0.02)
         self.screen_norm = nn.LayerNorm(config.d_screen)
         self.screen_projection = nn.Linear(config.d_screen, d_model)
-        self.screen_positions = nn.Parameter(torch.randn(config.n_patches, d_model) * 0.02)
+        if config.coordinate_positions:
+            self.coordinate_features = FourierFeatures(COORDINATE_FREQUENCIES)
+            self.coordinate_projection = nn.Linear(2 * 2 * COORDINATE_FREQUENCIES, d_model)
+        else:
+            self.screen_positions = nn.Parameter(torch.randn(config.n_patches, d_model) * 0.02)
         self.token_type_embedding = nn.Parameter(torch.randn(3, d_model) * 0.02)
 
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(n_blocks)])
@@ -129,22 +136,53 @@ class WorkflowTransformer(nn.Module):
             self.confidence_head.bias, math.log(math.expm1(config.confidence_init - config.confidence_min))
         )
 
-    def _run_block(self, block, tokens, attend_mask, last_token_only=False):
+    def _run_block(self, block, *inputs):
         if self.config.activation_checkpointing and self.training and torch.is_grad_enabled():
-            return checkpoint(block, tokens, attend_mask, last_token_only, use_reentrant=False)
-        return block(tokens, attend_mask, last_token_only)
+            return checkpoint(block, *inputs, use_reentrant=False)
+        return block(*inputs)
 
-    def screen_tokens(self, batch) -> torch.Tensor:
-        """[B * T, n_screen_tokens, d_model]; in training a random subset of each frame's patches is kept."""
-        features = batch.frames.flatten(0, 1)
-        n_frames, n_patches, _ = features.shape
-        positions = self.screen_positions[:n_patches]
+    def screen_tokens(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Every step's screen tokens, padded: [B * T, L, d_model] and the mask [B * T, L] of real tokens.
+
+        In training a random subset of each step's tokens is kept.
+        """
+        features = batch.screen_tokens
+        grids = batch.screen_grids.flatten(0, 1)
+        counts = grids.prod(-1)
+        first_token = counts.cumsum(0) - counts
+        step = torch.repeat_interleave(torch.arange(len(counts), device=counts.device), counts)
+        cell = torch.arange(len(step), device=counts.device) - first_token[step]  # row-major index in the step's grid
+        slot, kept_counts = cell, counts
         if self.training and self.config.screen_token_dropout > 0:
-            n_kept = max(1, int(round(n_patches * (1 - self.config.screen_token_dropout))))
-            kept = torch.rand(n_frames, n_patches, device=features.device).argsort(1)[:, :n_kept]
-            features = features.gather(1, kept[..., None].expand(-1, -1, features.shape[-1]))
-            positions = positions[kept]
-        return self.screen_projection(self.screen_norm(features)) + positions + self.token_type_embedding[SCREEN]
+            kept_counts = (counts * (1 - self.config.screen_token_dropout)).round().long().clamp(min=1)
+            kept_counts = kept_counts.minimum(counts)
+            shuffled = (step + torch.rand(len(step), device=counts.device)).argsort()  # within each step
+            rank = torch.arange(len(step), device=counts.device) - first_token[step[shuffled]]
+            is_kept = rank < kept_counts[step[shuffled]]
+            kept, slot = shuffled[is_kept], rank[is_kept]
+            features, step, cell = features[kept], step[kept], cell[kept]
+
+        tokens = torch.cat(
+            [self._run_block(self.project_screen, chunk) for chunk in features.split(SCREEN_PROJECTION_CHUNK)]
+        )
+        tokens = tokens + self.token_type_embedding[SCREEN]
+        tokens = tokens + self.screen_token_positions(cell, grids[step]).to(tokens.dtype)
+        n_slots = int(kept_counts.max())
+        padded = tokens.new_zeros(len(counts), n_slots, tokens.shape[-1])
+        padded[step, slot] = tokens
+        return padded, torch.arange(n_slots, device=counts.device)[None, :] < kept_counts[:, None]
+
+    def project_screen(self, features: torch.Tensor) -> torch.Tensor:
+        return self.screen_projection(self.screen_norm(features))
+
+    def screen_token_positions(self, cell: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+        """[N, d_model] for tokens at row-major index `cell` [N] of a grid of `grid` [N, 2] = (rows, columns)."""
+        if not self.config.coordinate_positions:
+            return self.screen_positions[cell]
+        rows, columns = grid.unbind(-1)
+        x = (cell % columns + 0.5) / columns
+        y = (torch.div(cell, columns, rounding_mode="floor") + 0.5) / rows
+        return self.coordinate_projection(self.coordinate_features(torch.stack([x, y], -1)))
 
     def event_tokens(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
         """[B * T, E, d_model] and the mask [B * T, E] of slots that hold a token.
@@ -161,9 +199,8 @@ class WorkflowTransformer(nn.Module):
 
     def step_tokens(self, batch) -> tuple[torch.Tensor, torch.Tensor]:
         """Every step's screen and event tokens [B * T, L, d_model] and their attend mask [B * T, L]."""
-        screen = self.screen_tokens(batch)
+        screen, screen_mask = self.screen_tokens(batch)
         events, event_mask = self.event_tokens(batch)
-        screen_mask = torch.ones(screen.shape[:2], dtype=torch.bool, device=screen.device)
         return torch.cat([screen, events.to(screen.dtype)], 1), torch.cat([screen_mask, event_mask], 1)
 
     def heads(self, states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -179,7 +216,7 @@ class WorkflowTransformer(nn.Module):
         batch_size, n_steps = batch.valid.shape
         tokens, attend_mask = self.step_tokens(batch)
         for block in self.blocks[: self.first_block_with_history]:
-            tokens = self._run_block(block, tokens, attend_mask)
+            tokens = self._run_block(block, tokens, attend_mask, False)
 
         # unbind (rather than indexing [:, t] in the loop) keeps one stacked gradient instead of one per step
         tokens_by_step = tokens.view(batch_size, n_steps, *tokens.shape[1:]).unbind(1)
@@ -197,7 +234,7 @@ class WorkflowTransformer(nn.Module):
             sequence_mask = torch.cat([masks_by_step[step], history_mask], 1)
             for index, block in enumerate(history_blocks):
                 is_last = index == len(history_blocks) - 1
-                sequence = self._run_block(block, sequence, sequence_mask, last_token_only=is_last)
+                sequence = self._run_block(block, sequence, sequence_mask, is_last)
             block_output = sequence[:, -1]
             if self.config.architecture == "gru":
                 new_state = self.gru(block_output, state)

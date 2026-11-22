@@ -103,7 +103,7 @@ class Screenshots(torch.utils.data.Dataset):
 def encode_frames(tower, frames: list[Frame], writer: TokenShardWriter, args: argparse.Namespace) -> tuple[int, float]:
     """Appends every frame's tokens to the writer, in order. Returns (missing screenshots, seconds).
 
-    Loader workers only decode. Resizing, the tower and the copy off the GPU run here; a second thread writes.
+    Loader workers only decode. Resizing, the tower and the copy off the GPU run here; other threads write.
     """
     loader = torch.utils.data.DataLoader(
         Screenshots(frames),
@@ -121,9 +121,10 @@ def encode_frames(tower, frames: list[Frame], writer: TokenShardWriter, args: ar
         waited += time.time() - waiting_since
         missing += sum(screenshot is None for screenshot in screenshots)
         tokens, grids = encode_batch(tower, [placeholder if s is None else s for s in screenshots])
-        written.append(tokens, grids, checkpoint=(batch_index + 1) % CHECKPOINT_BATCHES == 0)
+        written.append(tokens, grids)
         done += len(screenshots)
         if (batch_index + 1) % CHECKPOINT_BATCHES == 0:
+            written.checkpoint()
             elapsed = time.time() - started
             print(
                 f"{done}/{len(frames)} frames  {done / elapsed:.1f}/s  waiting for screenshots {waited / elapsed:.0%}"
@@ -154,50 +155,58 @@ def encode_batch(tower, screenshots: list[torch.Tensor]) -> tuple[torch.Tensor, 
 
 
 class BackgroundWriter:
-    """Appends token batches to the shard on a second thread, in order.
+    """Writes token batches to the shard on background threads.
 
     A batch leaves the GPU through a pinned buffer: a copy to ordinary memory would hold up the tower's next batch.
+    Several threads write, because one stream into a network file system is slower than a GPU produces tokens.
     """
 
-    def __init__(self, writer: TokenShardWriter, buffer_tokens: int, depth: int = 4):
-        self.writer, self.blocked_seconds = writer, 0.0
+    def __init__(self, writer: TokenShardWriter, buffer_tokens: int, threads: int = 4):
+        self.writer, self.blocked_seconds, self.error = writer, 0.0, None
         self.queue, self.buffers = queue.Queue(), queue.Queue()
-        for _ in range(depth):
+        for _ in range(2 * threads):
             self.buffers.put(torch.empty((buffer_tokens, writer.dim), dtype=torch.int16).pin_memory())
-        self.error = None
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
+        self.threads = [threading.Thread(target=self._run, daemon=True) for _ in range(threads)]
+        for thread in self.threads:
+            thread.start()
 
-    def append(self, tokens: torch.Tensor, grids: list[tuple[int, int]], checkpoint: bool = False):
-        """tokens: bfloat16 [n, dim] on the GPU."""
-        if self.error is not None:
-            raise self.error
+    def append(self, tokens: torch.Tensor, grids: list[tuple[int, int]]):
+        """tokens: bfloat16 [n, dim] on the GPU, the tokens of the next len(grids) steps."""
         started = time.time()
         buffer = self.buffers.get()
         self.blocked_seconds += time.time() - started
         buffer[: len(tokens)].copy_(tokens.view(torch.int16), non_blocking=True)
         copied = torch.cuda.Event()
         copied.record()
-        self.queue.put((buffer, len(tokens), copied, grids, checkpoint))
+        self.queue.put((buffer, len(tokens), copied, self.writer.reserve(grids)))
 
-    def close(self):
-        self.queue.put(None)
-        self.thread.join()
+    def checkpoint(self):
+        """Waits until everything appended is written, then makes it durable."""
+        started = time.time()
+        self.queue.join()
+        self.blocked_seconds += time.time() - started
         if self.error is not None:
             raise self.error
+        self.writer.checkpoint()
+
+    def close(self):
+        self.checkpoint()
+        for _ in self.threads:
+            self.queue.put(None)
+        for thread in self.threads:
+            thread.join()
 
     def _run(self):
         while (item := self.queue.get()) is not None:
-            buffer, n_tokens, copied, grids, checkpoint = item
+            buffer, n_tokens, copied, offset = item
             try:
                 if self.error is None:
                     copied.synchronize()
-                    self.writer.append(buffer[:n_tokens].numpy().view(np.uint16), grids)
-                    if checkpoint:
-                        self.writer.checkpoint()
+                    self.writer.write(offset, buffer[:n_tokens].numpy().view(np.uint16))
             except Exception as error:
                 self.error = error
             self.buffers.put(buffer)
+            self.queue.task_done()
 
 
 if __name__ == "__main__":

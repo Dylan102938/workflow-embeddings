@@ -133,7 +133,8 @@ class FrameStore:
 class TokenShardWriter:
     """Writes one shard of a tower's own tokens: append() the steps in order, then finish().
 
-    checkpoint() makes what was appended so far durable; a writer opened on an interrupted shard continues after
+    append() is reserve() and write(); write() may run on other threads, in any order. checkpoint() makes the
+    steps so far durable once their tokens are written; a writer opened on an interrupted shard continues after
     its last checkpoint (n_steps says where). The meta file marks the shard complete, so it is written last.
     """
 
@@ -142,11 +143,10 @@ class TokenShardWriter:
         self.partial_index_path = self.cache_dir / f"index_{tag}.partial.npy"
         tokens_path = self.cache_dir / f"tokens_{tag}.bin"
         resumed = self.partial_index_path.exists() and tokens_path.exists()
-        self.index = [tuple(row) for row in np.load(self.partial_index_path)] if resumed else []
+        self.index = np.load(self.partial_index_path).tolist() if resumed else []
         self.n_tokens = sum(rows * columns for _, rows, columns in self.index)
-        self.file = open(tokens_path, "r+b" if resumed else "wb")
-        self.file.truncate(self.n_tokens * 2 * dim)
-        self.file.seek(self.n_tokens * 2 * dim)
+        self.file_descriptor = os.open(tokens_path, os.O_RDWR | os.O_CREAT, 0o644)
+        os.ftruncate(self.file_descriptor, self.n_tokens * 2 * dim)
 
     @property
     def n_steps(self) -> int:
@@ -154,19 +154,29 @@ class TokenShardWriter:
 
     def append(self, tokens: np.ndarray, grids: list[tuple[int, int]]):
         """tokens: [n, dim] uint16, the tokens of len(grids) steps one after the other."""
+        self.write(self.reserve(grids), tokens)
+
+    def reserve(self, grids: list[tuple[int, int]]) -> int:
+        """Adds the next steps to the index and returns the file offset of their tokens."""
+        offset = self.n_tokens * 2 * self.dim
         for rows, columns in grids:
             self.index.append((self.n_tokens, rows, columns))
             self.n_tokens += rows * columns
-        self.file.write(memoryview(np.ascontiguousarray(tokens)))
+        return offset
+
+    def write(self, offset: int, tokens: np.ndarray):
+        view = memoryview(np.ascontiguousarray(tokens)).cast("B")
+        done = 0
+        while done < len(view):
+            done += os.pwrite(self.file_descriptor, view[done:], offset + done)
 
     def checkpoint(self):
-        self.file.flush()
-        os.fsync(self.file.fileno())
+        os.fsync(self.file_descriptor)
         np.save(self.partial_index_path, np.array(self.index, np.int64).reshape(-1, 3))
 
     def finish(self, meta: dict):
         self.checkpoint()
-        self.file.close()
+        os.close(self.file_descriptor)
         self.partial_index_path.rename(self.cache_dir / f"index_{self.tag}.npy")
         meta = {**meta, "dim": self.dim, "tokens": self.n_tokens}
         (self.cache_dir / f"meta_{self.tag}.json").write_text(json.dumps(meta))

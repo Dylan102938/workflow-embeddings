@@ -107,6 +107,24 @@ def test_a_tower_cache_holds_each_step_on_its_own_grid(data_config):
     assert ((batch.screen_grids.prod(-1) > 0) == batch.valid).all()
 
 
+def test_an_interrupted_tower_shard_continues_after_its_last_checkpoint(tmp_path):
+    from wfemb.storage.frames import FrameStore, TokenShardWriter
+
+    tokens = np.arange(10 * 6 * 4, dtype=np.uint16).reshape(10, 6, 4)
+    writer = TokenShardWriter(tmp_path, "00of01", dim=4)
+    writer.append(tokens[:4].reshape(-1, 4), [(2, 3)] * 4)
+    writer.checkpoint()
+    writer.append(tokens[4:7].reshape(-1, 4), [(2, 3)] * 3)  # lost: the shard is interrupted before a checkpoint
+
+    writer = TokenShardWriter(tmp_path, "00of01", dim=4)
+    assert writer.n_steps == 4
+    writer.append(tokens[4:].reshape(-1, 4), [(3, 2)] * 6)
+    writer.finish({"lo": 0, "hi": 10, "tower": "siglip2"})
+    store = FrameStore([(tmp_path, 0)])
+    assert np.array_equal(store.read(np.arange(10)), tokens.reshape(-1, 4))
+    assert store.grids.tolist() == [[2, 3]] * 4 + [[3, 2]] * 6
+
+
 @pytest.mark.parametrize(
     "architecture,beta,tower",
     [

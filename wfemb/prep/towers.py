@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import urllib.request
 
 import torch
 from torchvision.transforms.v2 import InterpolationMode
@@ -140,10 +141,18 @@ class Inkling2(Tower):
 TOWERS = {"siglip2": Siglip2, "qwen3.8": Qwen38, "inkling2": Inkling2}
 
 
-def checkpoint_config(repository: str) -> dict:
-    from huggingface_hub import hf_hub_download
+def checkpoint_file(repository: str, file: str, first: int = 0, end: int | None = None) -> bytes:
+    """Bytes [first, end) of a file of a public Hugging Face repository."""
+    request = urllib.request.Request(
+        f"https://huggingface.co/{repository}/resolve/main/{file}",
+        headers={"Range": f"bytes={first}-{'' if end is None else end - 1}"},
+    )
+    with urllib.request.urlopen(request) as response:
+        return response.read()
 
-    return json.load(open(hf_hub_download(repository, "config.json")))
+
+def checkpoint_config(repository: str) -> dict:
+    return json.loads(checkpoint_file(repository, "config.json"))
 
 
 def checkpoint_tensors(repository: str, prefix: str) -> dict[str, torch.Tensor]:
@@ -151,19 +160,15 @@ def checkpoint_tensors(repository: str, prefix: str) -> dict[str, torch.Tensor]:
 
     Read with ranged requests: a tower is about 1 GB of a checkpoint of 55 GB (Qwen) or 390 GB (Inkling).
     """
-    from huggingface_hub import HfFileSystem, hf_hub_download
-
-    index = json.load(open(hf_hub_download(repository, "model.safetensors.index.json")))
+    index = json.loads(checkpoint_file(repository, "model.safetensors.index.json"))
     tensors = {}
     for file in sorted({file for name, file in index["weight_map"].items() if name.startswith(prefix)}):
-        with HfFileSystem().open(f"{repository}/{file}", "rb") as remote:
-            header_size = int.from_bytes(remote.read(8), "little")
-            header = json.loads(remote.read(header_size))
-            wanted = {name: entry for name, entry in header.items() if name.startswith(prefix)}
-            first = min(entry["data_offsets"][0] for entry in wanted.values())
-            last = max(entry["data_offsets"][1] for entry in wanted.values())
-            remote.seek(8 + header_size + first)
-            data = bytearray(remote.read(last - first))
+        header_size = int.from_bytes(checkpoint_file(repository, file, 0, 8), "little")
+        header = json.loads(checkpoint_file(repository, file, 8, 8 + header_size))
+        wanted = {name: entry for name, entry in header.items() if name.startswith(prefix)}
+        first = min(entry["data_offsets"][0] for entry in wanted.values())
+        last = max(entry["data_offsets"][1] for entry in wanted.values())
+        data = bytearray(checkpoint_file(repository, file, 8 + header_size + first, 8 + header_size + last))
         for name, entry in wanted.items():
             if entry["dtype"] != "BF16":
                 raise ValueError(f"{repository} {name}: {entry['dtype']} weights are not supported")

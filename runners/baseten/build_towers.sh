@@ -41,7 +41,7 @@ for spec in $TOWERS; do
         done
         fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
         sleep 3; for t in "${tails[@]}"; do pkill -P "$t" 2>/dev/null; kill "$t" 2>/dev/null; done
-        (( fail )) && { echo "FAILED $spec"; tail -20 "$BT_SCRATCH_DIR"/cache_${tower}_*.log; exit 1; }
+        (( fail )) && { echo "FAILED $spec"; for f in "$BT_SCRATCH_DIR"/cache_${tower}_*.log; do tail -n 25 "$f"; done; exit 1; }
     done
     name=$(python -c "from wfemb.config import tower_frame_cache_name; print(tower_frame_cache_name('$tower', $budget))")
     echo "$spec built in $(( $(date +%s) - t1 ))s: $(du -sh "$TEAM/bulk/$SUB$name" | cut -f1) in the team cache"

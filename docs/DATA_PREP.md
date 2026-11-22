@@ -268,11 +268,33 @@ the cosine is 0.9965 to 0.9996: it resizes on the CPU, we on the GPU, and pixels
 **Speed.** Decoding PNGs is the one thing that needs CPUs (9 ms per megapixel and core with torchvision's
 decoder), so it is all the loader workers do. Screenshots of one size are stacked on the GPU, and resizing, scaling,
 cutting into patches and the tower run there in bfloat16. A second thread copies the tokens off the GPU and
-writes them. Each shard's log gives frames per second and the share of time the GPU process waited for screenshots
-and for the disk. On Baseten (`WFEMB_TOWERS="siglip2:576 qwen3.8:576 inkling2:576" WFEMB_GPUS=4 truss train push
-runners/baseten/build_config.py`), four H100s with 14 decoding workers each, writing straight into the team cache:
+writes them through pinned buffers, on four streams per shard. Attention runs over a whole batch at once
+(`towers.attention_per_image`; transformers' Qwen and Inkling towers attend image by image). Each shard's log gives
+frames per second and the share of time the GPU process waited for screenshots and for the disk.
 
-TOWER_BUILD_TABLE
+On Baseten (`WFEMB_TOWERS="siglip2:576 qwen3.8:576 inkling2:576" WFEMB_GPUS=4 truss train push
+runners/baseten/build_config.py`) the caches are written straight into the team cache, which has room for them
+and a job's local disk does not. AgentNet's 408,384 screenshots at budget 576 (2026-11-21, H100s with 14 decoding
+workers each; 229.95M tokens for the 32-pixel towers, 563 per screenshot):
+
+| | `siglip2` | `qwen3.8` | `inkling2` |
+|---|---|---|---|
+| Frames per second and GPU | 123 to 129 | 83 to 87 | 84 to 94 |
+| Time waiting for screenshots | 12 to 15% | 1 to 6% | 2 to 5% |
+| Time waiting for the disk | 0% | 5 to 14% | about 50% |
+| GPU hours | 0.97 | 1.33 | 1.28 |
+| Cache size | 494 GB | 2.2 TB | 2.0 TB |
+
+The wide towers are limited by the team cache, which takes about 0.5 GB/s per file however many threads write:
+that is 87 frames per second of 5120-channel tokens. Before the pinned buffers, the batched attention and the
+parallel writes, `qwen3.8` ran at 52 to 57 frames per second. For comparison, `cache_frames.py` (preprocessing in
+the loader workers) encodes 77 to 139 frames per second and GPU at up to 1024 patches per screenshot; `siglip2`
+here has 2304.
+
+Training reads these caches in place (`runners/baseten/train.sh`). One job gets about 3 GB/s from the team cache
+(0.74 GB/s per stream, no more beyond 8 streams), and a batch of 5120-channel tokens is 3.5 GB: the `qwen3.8` and
+`inkling2` runs are bound by it at about 1.8 s per step, against 0.4 s for `siglip2`.
+
 
 ## Added datasets
 
